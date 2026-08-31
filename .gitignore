@@ -1,0 +1,13 @@
+# Derived outputs — regenerate with run_pipeline.py / analyze.py / detail.py
+payer_parquet/
+mrf_cache/
+detail.csv
+clean_comparison.csv
+tmp_detail.csv
+*.part
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
