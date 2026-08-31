@@ -10,7 +10,12 @@ Re-runnable: a crash or Ctrl-C loses at most the file in flight. Everything
 already parsed is left alone on the next run.
 
 Usage:
-    python run_pipeline.py
+    python run_pipeline.py                 # parse every unparsed payer
+    python run_pipeline.py --limit 50000   # stop each file after N rate rows
+
+--limit is for trialling a newly added payer: it caps pass 2 so you find out
+whether a file yields usable rows in minutes instead of hours. Output written
+under --limit is partial, so delete that parquet before a real run.
 
 Edit config in config.py: TARGET_CSV, PAYER_FILES, and the cache/output dirs.
 """
@@ -19,6 +24,7 @@ import os
 import sys
 import time
 import urllib.request
+from urllib.parse import urlparse, unquote
 
 import pandas as pd
 
@@ -41,10 +47,23 @@ def load_targets(csv_path):
     return npis, npi_to_system
 
 
+def cache_name(url):
+    """
+    Local filename for a URL.
+
+    Payer MRF links are usually signed (Azure/S3) and carry a query string
+    full of characters Windows will not accept in a filename, so take the
+    path component only and whitelist what survives.
+    """
+    raw = unquote(urlparse(url).path).split("/")[-1]
+    safe = "".join(c if (c.isalnum() or c in "._-") else "_" for c in raw)
+    return safe[:150] or "mrf_download"
+
+
 def download_once(url, cache_dir):
     """Download url into cache_dir if not already there. Return local path."""
     os.makedirs(cache_dir, exist_ok=True)
-    fname = url.split("/")[-1]
+    fname = cache_name(url)
     local = os.path.join(cache_dir, fname)
     if os.path.exists(local) and os.path.getsize(local) > 0:
         log(f"  cached: {fname} ({os.path.getsize(local)/1e9:.2f} GB)")
@@ -62,20 +81,24 @@ def download_once(url, cache_dir):
     return local
 
 
-def parse_one(payer, source, target_npis, npi_to_system, out_path):
-    log(f"  pass 1: provider references...")
-    state = {"n": 0}
+def systems_for(npi_csv, npi_to_system):
+    """Every distinct system a row's matched NPIs belong to, sorted."""
+    found = {npi_to_system.get(n) for n in npi_csv.split(",") if n}
+    found.discard(None)
+    return ",".join(sorted(found))
 
-    def p1(n):
-        state["n"] = n
 
-    rel = build_relevant_groups(source, target_npis, progress=p1)
+def parse_one(payer, source, target_npis, npi_to_system, out_path,
+              max_records=None):
+    log("  pass 1: provider references...")
+    rel = build_relevant_groups(source, target_npis)
     log(f"    kept {len(rel)} relevant provider groups")
 
-    log(f"  pass 2: in-network rates...")
+    log("  pass 2: in-network rates...")
     rows = []
     last = time.time()
-    for row in stream_filtered_rates(source, rel, target_npis):
+    for row in stream_filtered_rates(source, rel, target_npis,
+                                     max_records=max_records):
         rows.append(row)
         if time.time() - last > 10:
             log(f"    ... {len(rows):,} rows so far")
@@ -88,14 +111,39 @@ def parse_one(payer, source, target_npis, npi_to_system, out_path):
 
     df = pd.DataFrame(rows)
     df["payer"] = payer
-    df["system"] = df["matched_npis"].str.split(",").str[0].map(npi_to_system)
+    # One rate can apply to a provider group spanning several systems, so
+    # store every system it touches. Collapsing to one here (the old
+    # behaviour) silently misattributed ~44% of rows; analyze.py now decides
+    # how to attribute them at query time.
+    df["systems"] = df["matched_npis"].map(
+        lambda v: systems_for(v, npi_to_system))
+    df["system_count"] = df["systems"].map(
+        lambda v: len(v.split(",")) if v else 0)
     df.to_parquet(out_path, index=False)
-    log(f"  wrote {out_path} ({len(df):,} rows)")
+    multi = int((df["system_count"] > 1).sum())
+    log(f"  wrote {out_path} ({len(df):,} rows, {multi:,} span >1 system)")
     return len(df)
 
 
-def main():
+def parse_args(argv):
+    """Return max_records (None if unlimited)."""
+    if "--limit" in argv:
+        i = argv.index("--limit")
+        if i + 1 >= len(argv):
+            raise SystemExit("--limit needs a number, e.g. --limit 50000")
+        try:
+            return int(argv[i + 1])
+        except ValueError:
+            raise SystemExit(f"--limit needs a number, got {argv[i + 1]!r}")
+    return None
+
+
+def main(argv=()):
+    max_records = parse_args(list(argv))
     log(f"ijson backend: {BACKEND}")
+    if max_records:
+        log(f"  --limit active: stopping each file at {max_records:,} rows "
+            f"(output will be PARTIAL)")
     if BACKEND != "yajl2_c":
         log("  WARNING: fast C backend not active. "
             "pip install ijson with yajl for a big speedup.")
@@ -121,7 +169,8 @@ def main():
                 source = download_once(url, config.CACHE_DIR)
             else:
                 source = url  # local path, or stream the URL directly
-            n = parse_one(payer, source, target_npis, npi_to_system, out_path)
+            n = parse_one(payer, source, target_npis, npi_to_system,
+                          out_path, max_records=max_records)
             total_rows += n
         except KeyboardInterrupt:
             log("interrupted by user. progress on parsed files is saved.")
@@ -135,4 +184,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

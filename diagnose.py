@@ -11,6 +11,11 @@ rates, run this to find out why. It samples the in_network block and reports:
 Usage:
     python diagnose.py <payer_label>
     python diagnose.py Aetna_NY
+    python diagnose.py Aetna_NY --sample 20000
+
+--sample sets how many in_network items to inspect (default 1000). Raise it
+when the report says the signal is mixed or empty: the first items in a file
+are often unrepresentative.
 """
 
 import sys
@@ -89,12 +94,36 @@ def diagnose(source, relevant_groups, target_npis, sample=1000):
         print("  didn't, increase sample or check negotiated_value nulls.")
     else:
         print("  Mixed/empty signal. Try a larger --sample or another file.")
+        print("  e.g. python diagnose.py <payer> --sample 20000")
 
 
-def main():
-    if len(sys.argv) < 2:
-        raise SystemExit("usage: python diagnose.py <payer_label>")
-    payer = sys.argv[1]
+def parse_args(argv):
+    sample = 1000
+    payer = None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--sample":
+            i += 1
+            if i >= len(argv):
+                raise SystemExit("--sample needs a number, e.g. --sample 20000")
+            try:
+                sample = int(argv[i])
+            except ValueError:
+                raise SystemExit(f"--sample needs a number, got {argv[i]!r}")
+        elif payer is None:
+            payer = a
+        else:
+            raise SystemExit(f"unexpected argument {a!r}")
+        i += 1
+    if payer is None:
+        raise SystemExit(
+            "usage: python diagnose.py <payer_label> [--sample N]")
+    return payer, sample
+
+
+def main(argv):
+    payer, sample = parse_args(list(argv))
     source = resolve_source(payer)
 
     df = pd.read_csv(config.TARGET_CSV, dtype=str)
@@ -103,8 +132,8 @@ def main():
     print(f"Building relevant provider groups for {payer}...")
     rel = build_relevant_groups(source, target_npis)
     print(f"  matched {len(rel)} provider groups containing target NPIs")
-    diagnose(source, rel, target_npis)
+    diagnose(source, rel, target_npis, sample=sample)
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

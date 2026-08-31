@@ -47,12 +47,19 @@ class _ChunkedStream(io.RawIOBase):
         return True
 
 
+GZIP_MAGIC = bytes((0x1F, 0x8B))
+
+
 def open_source(path_or_url):
     """
-    Open a local .json, local .json.gz, or remote .json.gz uniformly.
+    Open a local or remote MRF uniformly, gzipped or not.
+
+    Compression is detected from the first two bytes rather than from the
+    file extension: payers serve plain .json from .gz URLs and vice versa,
+    and signed URLs carry query strings that hide the real suffix.
 
     Returns (file_like, closer) where closer is a callable to release the
-    underlying HTTP connection (or None for local files).
+    underlying HTTP connection (or close the local file).
     """
     if path_or_url.startswith("http"):
         r = requests.get(
@@ -63,13 +70,14 @@ def open_source(path_or_url):
         )
         r.raise_for_status()
         buf = io.BufferedReader(_ChunkedStream(r), buffer_size=262144)
-        return gzip.GzipFile(fileobj=buf), r.close
-    elif path_or_url.endswith(".gz"):
-        f = gzip.open(path_or_url, "rb")
-        return f, f.close
-    else:
-        f = open(path_or_url, "rb")
-        return f, f.close
+        if buf.peek(2)[:2] == GZIP_MAGIC:
+            return gzip.GzipFile(fileobj=buf), r.close
+        return buf, r.close
+
+    with open(path_or_url, "rb") as probe:
+        is_gz = probe.read(2) == GZIP_MAGIC
+    f = gzip.open(path_or_url, "rb") if is_gz else open(path_or_url, "rb")
+    return f, f.close
 
 
 def build_relevant_groups(path_or_url, target_npis, progress=None):
