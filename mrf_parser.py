@@ -48,6 +48,14 @@ class _ChunkedStream(io.RawIOBase):
 
 
 GZIP_MAGIC = bytes((0x1F, 0x8B))
+ZIP_MAGIC = bytes((0x50, 0x4B))   # "PK"
+
+_ZIP_MSG = (
+    "{} is a ZIP archive, not JSON or gzip. Some payers publish a few rate "
+    "files as .zip; this parser reads .json and .json.gz. Unzip it and point "
+    "config at the extracted .json, or pick a .json.gz file instead "
+    "(find_files.py lists the format of every candidate)."
+)
 
 # Several payer CDNs (UnitedHealthcare's among them) answer the default
 # python-requests user agent with 403, and some reject HEAD outright. Present
@@ -81,13 +89,19 @@ def open_source(path_or_url):
         )
         r.raise_for_status()
         buf = io.BufferedReader(_ChunkedStream(r), buffer_size=262144)
-        if buf.peek(2)[:2] == GZIP_MAGIC:
+        head = buf.peek(2)[:2]
+        if head == ZIP_MAGIC:
+            r.close()
+            raise ValueError(_ZIP_MSG.format(path_or_url.split("?")[0]))
+        if head == GZIP_MAGIC:
             return gzip.GzipFile(fileobj=buf), r.close
         return buf, r.close
 
     with open(path_or_url, "rb") as probe:
-        is_gz = probe.read(2) == GZIP_MAGIC
-    f = gzip.open(path_or_url, "rb") if is_gz else open(path_or_url, "rb")
+        head = probe.read(2)
+    if head == ZIP_MAGIC:
+        raise ValueError(_ZIP_MSG.format(path_or_url))
+    f = gzip.open(path_or_url, "rb") if head == GZIP_MAGIC else open(path_or_url, "rb")
     return f, f.close
 
 

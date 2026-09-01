@@ -206,6 +206,25 @@ class TestOpenSource(FixtureCase):
             closer()
 
 
+class TestZipRejection(unittest.TestCase):
+    """A few payer rate files are .zip; fail with an explanation, not a
+    confusing gzip/JSON parse error deep in pass 1."""
+
+    def test_zip_file_raises_a_useful_error(self):
+        tmp = tempfile.mkdtemp(prefix="mrf_zip_")
+        try:
+            import zipfile
+            p = os.path.join(tmp, "rates.zip")
+            with zipfile.ZipFile(p, "w") as z:
+                z.writestr("rates.json", '{"in_network": []}')
+            with self.assertRaises(ValueError) as cm:
+                open_source(p)
+            self.assertIn("ZIP archive", str(cm.exception))
+            self.assertIn("find_files.py", str(cm.exception))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestSystemAttribution(unittest.TestCase):
     """The bug that misattributed ~44% of real rows."""
 
