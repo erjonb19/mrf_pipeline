@@ -33,17 +33,6 @@ PAYER_FILES = [
     # it orphans that file and triggers a full re-parse of the 2.9 GB source.
     {"payer": "Aetna_NY", "url": r"C:\Users\Erjon\Downloads\2026-06-05_pl-1qi-hr23_Aetna-Health-Insurance-Company-of-New-York.json\2026-06-05_pl-1qi-hr23_Aetna-Health-Insurance-Company-of-New-York.json"},
 
-    # --- UnitedHealthcare, New York insurer entity -------------------------
-    # All group (employer) market, from the 2026-08-01 index. Sizes are the
-    # compressed download. Ordered smallest first so the cheap ones finish
-    # before the expensive ones.
-    {"payer": "UHC_NY_ChoicePlus",  "url": UHC_NY + "Choice-Plus_8_in-network-rates.json.gz"},        # 9.54 GB, 242 plans, broad POS
-    {"payer": "UHC_NY_ChoiceEPO",   "url": UHC_NY + "Choice-EPO_561_in-network-rates.json.gz"},       # 9.54 GB, 291 plans, EPO
-    {"payer": "UHC_NY_SelectEPO",   "url": UHC_NY + "Select-EPO_656_in-network-rates.json.gz"},       # 9.56 GB, 291 plans, EPO
-    {"payer": "UHC_NY_POSChoicePlus", "url": UHC_NY + "PS1-50_C2_in-network-rates.json.gz"},          # 15.08 GB, 211 plans
-    {"payer": "UHC_NY_ChoiceEPO50", "url": UHC_NY + "EP1-50_C1_in-network-rates.json.gz"},            # 15.08 GB, 89 plans
-    {"payer": "UHC_NY_NationalPPO", "url": UHC_NY + "PP1-00_P3_in-network-rates.json.gz"},            # 15.42 GB, 28 plans
-
     # --- Cigna Health & Life Insurance Company -----------------------------
     # From the 2026-08-01 index, all group market. Signed URLs, but the
     # signatures run to 2036. OAP (Open Access Plus) is Cigna's broad
@@ -54,4 +43,15 @@ PAYER_FILES = [
     {"payer": "Cigna_PathwellPPO", "url": r"https://d25kgz5rikkq4n.cloudfront.net/cost_transparency/mrf/in-network-rates/reporting_month=2026-08/2026-08-01_cigna-health-life-insurance-company_pathwell-ppo_in-network-rates.json.gz?Expires=2106187199&Signature=QyMTCcKSo7wO6FreVP65TqIQWdX5p5F-l5xm~QzofTUOT2TIdoo2oA9DteStxVZk-ywWF-E8spybTHBtbIalDVQ-ls~bjqiKlc~g2fzoz1Xe5aNj8E2BhXdqw83mj37Uy-SFM7JbLRfZ3~k7HuQZLErIDVf4laHvw6MousJ1Xjyd4WDL3ZUYYg6SV3f75GbKDg27RxPRROnElIUGVxmzgqa-TpbMMiprDi7uIdw8s-cy~aFYhl~VL31xa3F-iDD2B2oZxQtDb3w6j9PQYIqt~zvR0kUtsuPlAvaOV9II0USIwfHyUkxq-OHKZ5WIEIAA8p2VetTZcthK7sB-Xn1JCQ__&Key-Pair-Id=K1NVBEPVH9LWJP"},  # 1.58 GB,    367 plans, PPO
     {"payer": "Cigna_NationalPPO", "url": r"https://d25kgz5rikkq4n.cloudfront.net/cost_transparency/mrf/in-network-rates/reporting_month=2026-08/2026-08-01_cigna-health-life-insurance-company_national-ppo_in-network-rates.json.gz?Expires=2106187199&Signature=jZ~657Kk7wjiMWhClpfL8IziYAvhgIOtDWVqlnI28FSN4ix97G~BEWf~1KHjLRMkvqEPoxyRTm6-MfvGPHpGyoC9DO0TlvmRCJi570bQ0-iBILH1zQA4T~1s9uhTZ7LlFTYsDNbYmfP8t5X~EB4FKoTDG58g4k-2iceszrbdMS3vY8VIkbkJeLITDNsHVFu3uHiyXkrxWynwP0NsHzV2AbGL19mdaB-Rb7SALoQLgdno9JvvsaUnQ6ztB5UtMqXaG-AxiZiU5zBck2DMY4cUH8tsKOoXDQ4S2qQExLQrkG0sLn24XeiCOMr7wSonM3OiNpM1zDp3g4jgC7r6vu~7Uw__&Key-Pair-Id=K1NVBEPVH9LWJP"},  # 1.58 GB,    190 plans, PPO
     {"payer": "Cigna_LocalPlus", "url": r"https://d25kgz5rikkq4n.cloudfront.net/cost_transparency/mrf/in-network-rates/reporting_month=2026-08/2026-08-01_cigna-health-life-insurance-company_localplus-with-ebh-plus-pathwell_in-network-rates.json.gz?Expires=2106187199&Signature=HzAFxA3DysoSzxing1jwfisX2xiwTG90htS5XnwCJxY9RgyG04qNRezSvfMfjAhtPS-xEYXHG9zF1gQ~8KsCCIFqpKeVJWX7~lg8EroNLyUQ6HxfoXTOKOj3ZIBHUncptedncbAEQBQMdSR4IImdR7lT7gOotlTzpPdX0X0ikdefn7CerLCUyW77abYG01zFxS5lAL57Ch84qX9fVFsD9Eo7qJwuzCVAc6wWQyGUzyR1lVXrA~6G1u06MCirZ4q4AxFe13RsOwWejl4CDzp3XEwJuM2wIM32PkQGjJnxRiZL5NLcvAeqAogIV9DfHCsv7c4tTk33XkRQxr~dGuR4fw__&Key-Pair-Id=K1NVBEPVH9LWJP"},  # 1,659 plans, Local Plus (narrower)
+
+    # --- UnitedHealthcare, New York insurer entity -------------------------
+    # All group (employer) market, from the 2026-08-01 index. Sizes are the
+    # compressed download. Ordered smallest first so the cheap ones finish
+    # before the expensive ones.
+    {"payer": "UHC_NY_ChoicePlus",  "url": UHC_NY + "Choice-Plus_8_in-network-rates.json.gz"},        # 9.54 GB, 242 plans, broad POS
+    {"payer": "UHC_NY_ChoiceEPO",   "url": UHC_NY + "Choice-EPO_561_in-network-rates.json.gz"},       # 9.54 GB, 291 plans, EPO
+    {"payer": "UHC_NY_SelectEPO",   "url": UHC_NY + "Select-EPO_656_in-network-rates.json.gz"},       # 9.56 GB, 291 plans, EPO
+    {"payer": "UHC_NY_POSChoicePlus", "url": UHC_NY + "PS1-50_C2_in-network-rates.json.gz"},          # 15.08 GB, 211 plans
+    {"payer": "UHC_NY_ChoiceEPO50", "url": UHC_NY + "EP1-50_C1_in-network-rates.json.gz"},            # 15.08 GB, 89 plans
+    {"payer": "UHC_NY_NationalPPO", "url": UHC_NY + "PP1-00_P3_in-network-rates.json.gz"},            # 15.42 GB, 28 plans
 ]
