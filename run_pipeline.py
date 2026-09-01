@@ -93,7 +93,15 @@ def systems_for(npi_csv, npi_to_system):
 def parse_one(payer, source, target_npis, npi_to_system, out_path,
               max_records=None):
     log("  pass 1: provider references...")
-    rel = build_relevant_groups(source, target_npis)
+    last = [time.time()]
+
+    def p1(seen, kept):
+        # pass 1 is silent for many minutes on a big file; prove it is alive
+        if time.time() - last[0] > 15:
+            log(f"    ... scanned {seen:,} provider groups, {kept:,} relevant")
+            last[0] = time.time()
+
+    rel = build_relevant_groups(source, target_npis, progress=p1)
     log(f"    kept {len(rel)} relevant provider groups")
 
     log("  pass 2: in-network rates...")

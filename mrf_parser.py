@@ -109,11 +109,17 @@ def build_relevant_groups(path_or_url, target_npis, progress=None):
     """
     Pass 1. Return {provider_group_id(str): {'npis': csv, 'tins': csv}} for
     only the groups that contain at least one target NPI.
+
+    progress, if given, is called as progress(seen, kept) per item. Pass 1
+    reads the whole provider_references block before pass 2 can start, which
+    on a multi-GB file is many minutes, so callers should report something.
     """
     src, closer = open_source(path_or_url)
     relevant = {}
+    seen = 0
     try:
         for item in ijson.items(src, "provider_references.item"):
+            seen += 1
             gid = item.get("provider_group_id")
             if gid is None:
                 continue
@@ -131,7 +137,7 @@ def build_relevant_groups(path_or_url, target_npis, progress=None):
                     "tins": ",".join(sorted(tins)),
                 }
             if progress:
-                progress(len(relevant))
+                progress(seen, len(relevant))
     finally:
         if closer:
             closer()
