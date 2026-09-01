@@ -33,6 +33,7 @@ from mrf_parser import (
     build_relevant_groups,
     stream_filtered_rates,
     BACKEND,
+    HTTP_HEADERS,
 )
 
 
@@ -70,7 +71,8 @@ def download_once(url, cache_dir):
         return local
     log(f"  downloading: {fname}")
     tmp = local + ".part"
-    with urllib.request.urlopen(url, timeout=180) as resp, open(tmp, "wb") as out:
+    req = urllib.request.Request(url, headers=HTTP_HEADERS)
+    with urllib.request.urlopen(req, timeout=180) as resp, open(tmp, "wb") as out:
         while True:
             chunk = resp.read(1 << 20)
             if not chunk:

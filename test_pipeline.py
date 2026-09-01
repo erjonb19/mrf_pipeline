@@ -27,7 +27,8 @@ import pandas as pd
 
 from mrf_parser import build_relevant_groups, stream_filtered_rates, open_source
 from run_pipeline import systems_for, cache_name, parse_one
-from find_files import scan_index, matches, parse_args as find_files_args
+from find_files import (scan_index, matches, is_ancillary,
+                        parse_args as find_files_args)
 
 
 # NPI -> system for the fixture. 9999999999 is deliberately NOT a target.
@@ -371,10 +372,42 @@ class TestIndexScan(unittest.TestCase):
             find_files_args(["idx.json", "--market", "bogus"])
 
     def test_contains_collects_multiple_keywords(self):
-        _, market, _, _, _, contains = find_files_args(
+        _, market, _, _, _, _, contains = find_files_args(
             ["idx.json", "--contains", "PPO", "Open Access", "--market", "group"])
         self.assertEqual(contains, ["ppo", "open access"])
         self.assertEqual(market, "group")
+
+    def test_medical_flag_defaults_off(self):
+        _, _, _, _, _, medical, _ = find_files_args(["idx.json"])
+        self.assertFalse(medical)
+        _, _, _, _, _, medical, _ = find_files_args(["idx.json", "--medical"])
+        self.assertTrue(medical)
+
+
+class TestAncillaryFilter(unittest.TestCase):
+    """Dental/vision/behavioral files are referenced by every plan, so plan
+    count alone floats them above the medical networks that matter."""
+
+    def test_ancillary_names_are_detected(self):
+        for name in ("UHC---Embedded-Dental_UHC-Dental_in-network-rates.json.gz",
+                     "UHC---Embedded-Vision_UHC-Vision_in-network-rates.json.gz",
+                     "OHPH-Chiro_28_in-network-rates.json.gz",
+                     "Optum-Health-Behavioral-Services--OHBS-_5_in-network.json.gz",
+                     "CMC_Transplant_MRRF_in-network-rates.json.gz"):
+            self.assertTrue(is_ancillary("https://x.com/a/" + name), name)
+
+    def test_medical_networks_are_kept(self):
+        for name in ("Choice-Plus_8_in-network-rates.json.gz",
+                     "PP1-00_P3_in-network-rates.json.gz",
+                     "PS1-50_C2_in-network-rates.json.gz",
+                     "broad_ppo_in-network.json.gz"):
+            self.assertFalse(is_ancillary("https://x.com/a/" + name), name)
+
+    def test_matches_drops_ancillary_only_when_medical_set(self):
+        loc = "https://x.com/a/UHC-Dental_in-network-rates.json.gz"
+        rec = {"markets": {"group"}, "description": "", "names": []}
+        self.assertTrue(matches(loc, rec, "any", None, [], medical=False))
+        self.assertFalse(matches(loc, rec, "any", None, [], medical=True))
 
 
 if __name__ == "__main__":

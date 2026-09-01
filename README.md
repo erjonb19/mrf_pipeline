@@ -101,10 +101,15 @@ That field is not shown anywhere in the payers' HTML file listings, so start
 from the index instead:
 
 ```bash
-python find_files.py <index_url_or_path> --market group
-python find_files.py <index_url> --market group --contains PPO "Open Access"
-python find_files.py <index_url> --market group --export candidates.csv
+python find_files.py <index_url_or_path> --medical --market group
+python find_files.py <index_url> --medical --contains PPO "Choice Plus"
+python find_files.py <index_url> --medical --export candidates.csv
 ```
+
+Always pass `--medical`. Payers publish a separate rate file per benefit
+category, and the ancillary ones (dental, vision, chiropractic, behavioral)
+are referenced by *every* plan — so ranking by plan count floats them above
+the medical networks you actually want. `--medical` drops them.
 
 It streams the index (multi-GB indexes are fine, nothing is loaded whole)
 and ranks in-network files by how many plans reference them — more plans

@@ -18,6 +18,7 @@ the same as a 66 MB Cigna one.
 Usage:
     python find_files.py <index_url_or_path>
     python find_files.py anthem_index.json.gz --market group
+    python find_files.py <url> --medical --market group
     python find_files.py <url> --market group --contains PPO "Open Access"
     python find_files.py <url> --state NY --top 40
     python find_files.py <url> --market group --export candidates.csv
@@ -41,6 +42,16 @@ except Exception:  # pragma: no cover
 MARKETS = ("group", "individual", "any")
 SAMPLE_PLANS = 3  # plan names kept per file, for the report
 
+# Payers publish one rate file per benefit category, and the ancillary ones
+# (dental, vision, chiropractic, behavioral) are referenced by EVERY plan --
+# so ranking by plan count floats them to the top even though they hold no
+# hospital rates. --medical drops them.
+ANCILLARY = (
+    "dental", "vision", "chiro", "acupuncture", "massage", "naturopath",
+    "behavioral", "behavior-health", "ohbs", "ohph", "transplant",
+    "speech", "_st_", "_crs_", "hearing", "podiatry",
+)
+
 
 def parse_args(argv):
     source = None
@@ -48,6 +59,7 @@ def parse_args(argv):
     state = None
     top = 25
     export = None
+    medical = False
     contains = []
     i = 0
     while i < len(argv):
@@ -73,6 +85,8 @@ def parse_args(argv):
                 top = int(argv[i])
             except ValueError:
                 raise SystemExit(f"--top needs a number, got {argv[i]!r}")
+        elif a == "--medical":
+            medical = True
         elif a == "--export":
             i += 1
             if i >= len(argv):
@@ -95,7 +109,7 @@ def parse_args(argv):
             "usage: python find_files.py <index_url_or_path> "
             "[--market group] [--contains PPO] [--state NY] [--top N] "
             "[--export out.csv]")
-    return source, market, state, top, export, contains
+    return source, market, state, top, export, medical, contains
 
 
 def scan_index(source, progress_every=5000):
@@ -143,7 +157,15 @@ def scan_index(source, progress_every=5000):
     return files, seen
 
 
-def matches(loc, rec, market, state, contains):
+def is_ancillary(loc):
+    """True for dental/vision/behavioral-style files with no hospital rates."""
+    name = loc.split("?")[0].split("/")[-1].lower()
+    return any(k in name for k in ANCILLARY)
+
+
+def matches(loc, rec, market, state, contains, medical=False):
+    if medical and is_ancillary(loc):
+        return False
     if market != "any":
         if market not in rec["markets"]:
             return False
@@ -165,11 +187,13 @@ def short(loc, width=88):
 
 
 def main(argv):
-    source, market, state, top, export, contains = parse_args(argv)
+    source, market, state, top, export, medical, contains = parse_args(argv)
 
     print(f"Scanning index: {source}")
     if market != "any":
         print(f"  filter: plan_market_type = {market}")
+    if medical:
+        print("  filter: medical networks only (dental/vision/behavioral dropped)")
     if contains:
         print(f"  filter: name contains any of {contains}")
     if state:
@@ -181,7 +205,7 @@ def main(argv):
           f"{len(files):,} distinct in-network files.")
 
     keep = {loc: rec for loc, rec in files.items()
-            if matches(loc, rec, market, state, contains)}
+            if matches(loc, rec, market, state, contains, medical)}
     print(f"{len(keep):,} match the filters.\n")
 
     if not keep:

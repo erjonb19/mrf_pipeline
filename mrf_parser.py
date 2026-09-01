@@ -49,6 +49,17 @@ class _ChunkedStream(io.RawIOBase):
 
 GZIP_MAGIC = bytes((0x1F, 0x8B))
 
+# Several payer CDNs (UnitedHealthcare's among them) answer the default
+# python-requests user agent with 403, and some reject HEAD outright. Present
+# a browser UA and only ever GET.
+HTTP_HEADERS = {
+    "Accept-Encoding": "identity",
+    "Accept": "*/*",
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/128.0.0.0 Safari/537.36"),
+}
+
 
 def open_source(path_or_url):
     """
@@ -66,7 +77,7 @@ def open_source(path_or_url):
             path_or_url,
             stream=True,
             timeout=(10, 180),
-            headers={"Accept-Encoding": "identity"},
+            headers=HTTP_HEADERS,
         )
         r.raise_for_status()
         buf = io.BufferedReader(_ChunkedStream(r), buffer_size=262144)
