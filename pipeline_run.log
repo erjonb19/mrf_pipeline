@@ -1,10 +1,7 @@
-[22:14:47] ijson backend: yajl2_c
-[22:14:47] loaded 940 target NPIs
-[22:14:47] === Aetna_NY ===
-[22:14:47]   already parsed: payer_parquet\Aetna_NY.parquet (skipping)
-[22:14:47] === Cigna_PathwellOAP ===
-[22:14:47]   downloading: 2026-08-01_cigna-health-life-insurance-company_pathwell-oap_in-network-rates.json.gz
-[22:16:15]   downloaded: 2026-08-01_cigna-health-life-insurance-company_pathwell-oap_in-network-rates.json.gz (1.59 GB)
-[22:16:15]   pass 1: provider references...
-[22:32:59]     kept 34 relevant provider groups
-[22:32:59]   pass 2: in-network rates...
+[22:34:00] ijson backend: yajl2_c
+[22:34:00] loaded 940 target NPIs
+[22:34:00] === Aetna_NY ===
+[22:34:00]   already parsed: payer_parquet\Aetna_NY.parquet (skipping)
+[22:34:00] === Cigna_PathwellOAP ===
+[22:34:00]   cached: 2026-08-01_cigna-health-life-insurance-company_pathwell-oap_in-network-rates.json.gz (1.59 GB)
+[22:34:00]   pass 1: provider references...
