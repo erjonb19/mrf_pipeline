@@ -33,6 +33,8 @@ startup and falls back to pure Python if needed.
 ## Files
 
 - `config.py`            — edit this. Target CSV path, payer file list, dirs.
+- `find_files.py`        — pick broad-network rate files out of a payer's
+                           Table of Contents. `python find_files.py <index_url>`
 - `mrf_parser.py`        — core two-pass parser (don't need to touch).
 - `run_pipeline.py`      — orchestrator. `python run_pipeline.py`
 - `analyze.py`           — DuckDB comparison. `python analyze.py [codes...]`
@@ -47,9 +49,10 @@ startup and falls back to pure Python if needed.
 1. Put your `target_providers.csv` (the 940 NPIs from step 1) in this folder,
    or point `config.TARGET_CSV` at it.
 
-2. Edit `config.PAYER_FILES` with the payer in-network file URLs. Get these
-   from each payer's table of contents. Pick BROAD-network files (full PPO
-   networks), usually 1-2 per payer. Don't add narrow employer plans.
+2. Edit `config.PAYER_FILES` with the payer in-network file URLs. Use
+   `find_files.py` to pick them (see "Choosing the right file" below) —
+   guessing from a payer's HTML file listing is how you end up with a
+   narrow exchange network.
 
 3. Parse:
    ```bash
@@ -75,6 +78,51 @@ startup and falls back to pure Python if needed.
    python detail.py --system "NYU Langone" 27447
    python detail.py --export 27447 99213           # full dump to detail.csv
    ```
+
+## Choosing the right file
+
+Payers publish two kinds of file, and the portals do not make the difference
+obvious:
+
+| kind | filename | what it is |
+| ---- | -------- | ---------- |
+| Table of Contents | `*_index.json.gz` | a catalogue of plans, pointing at rate files |
+| In-Network Rates  | `*_pl-xxx-hr23_*.json.gz` | the actual rates, what this pipeline parses |
+
+Inside the index, every plan carries a `plan_market_type`:
+
+- **`group`** — employer business. Broad PPO networks. What you almost
+  always want.
+- **`individual`** — ACA exchange. Deliberately narrow networks. Parsing one
+  of these is the usual reason a run comes back with almost none of your
+  target providers in it.
+
+That field is not shown anywhere in the payers' HTML file listings, so start
+from the index instead:
+
+```bash
+python find_files.py <index_url_or_path> --market group
+python find_files.py <index_url> --market group --contains PPO "Open Access"
+python find_files.py <index_url> --market group --export candidates.csv
+```
+
+It streams the index (multi-GB indexes are fine, nothing is loaded whole)
+and ranks in-network files by how many plans reference them — more plans
+generally means a broader network. It prints a paste-ready `config.py` line
+for the top match.
+
+Payer index locations:
+
+- **Aetna** — `health1.aetna.com`, the TiC app. Note the entity: *Aetna Life
+  Insurance Company* writes the broad employer business; *Aetna Health
+  Insurance Company of New York* and anything under a `...FI`/exchange brand
+  code is narrow.
+- **UnitedHealthcare** — `transparency-in-coverage.uhc.com`. Not
+  `providermrf.uhc.com`, which serves Medicaid provider directories and drug
+  formularies under a different regulation and contains no rates.
+- **Anthem/Empire** — the index is a direct S3 object, e.g.
+  `antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/<date>_anthem_index.json.gz`
+- **Cigna** — `cigna.com/legal/compliance/machine-readable-files`
 
 ## System attribution
 
@@ -129,10 +177,11 @@ broader-network file) or whether there's a structural quirk to handle.
 python -m unittest test_pipeline -v
 ```
 
-19 tests against a synthetic in-network fixture: both provider-group shapes,
-multi-system attribution, the `negotiated_value` fallback, gzip detection,
-and filename sanitising. They need no network and no payer data — run them
-before and after touching `mrf_parser.py`.
+28 tests against synthetic in-network and index fixtures: both
+provider-group shapes, multi-system attribution, the `negotiated_value`
+fallback, gzip detection, filename sanitising, and index filtering. They need
+no network and no payer data — run them before and after touching
+`mrf_parser.py`.
 
 ## Notes
 

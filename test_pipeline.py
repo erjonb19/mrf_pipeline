@@ -27,6 +27,7 @@ import pandas as pd
 
 from mrf_parser import build_relevant_groups, stream_filtered_rates, open_source
 from run_pipeline import systems_for, cache_name, parse_one
+from find_files import scan_index, matches, parse_args as find_files_args
 
 
 # NPI -> system for the fixture. 9999999999 is deliberately NOT a target.
@@ -266,6 +267,114 @@ class TestParseOneEndToEnd(FixtureCase):
         visit = df[df["billing_code"] == "99213"].iloc[0]
         self.assertEqual(visit["systems"], "System A")
         self.assertEqual(visit["system_count"], 1)
+
+
+INDEX_FIXTURE = {
+    "reporting_entity_name": "Aetna Life Insurance Company",
+    "reporting_structure": [
+        {   # broad employer PPO, referenced by two structures
+            "reporting_plans": [
+                {"plan_name": "Aetna Choice POS II NY",
+                 "plan_market_type": "group"},
+                {"plan_name": "Aetna Open Access PPO NY",
+                 "plan_market_type": "group"},
+            ],
+            "in_network_files": [{
+                "description": "in-network",
+                "location": "https://x.com/a/broad_ppo_in-network.json.gz?sig=a",
+            }],
+        },
+        {
+            "reporting_plans": [
+                {"plan_name": "Aetna Choice POS II NJ",
+                 "plan_market_type": "group"},
+            ],
+            "in_network_files": [{
+                "description": "in-network",
+                "location": "https://x.com/a/broad_ppo_in-network.json.gz?sig=a",
+            }],
+        },
+        {   # exchange plan -> the narrow network that caused 13% coverage
+            "reporting_plans": [
+                {"plan_name": "Aetna Exchange_Elect Choice_3082",
+                 "plan_market_type": "individual"},
+            ],
+            "in_network_files": [{
+                "description": "in-network",
+                "location": "https://x.com/a/exchange_narrow_in-network.json.gz",
+            }],
+        },
+    ],
+}
+
+
+class TestIndexScan(unittest.TestCase):
+    """Choosing broad-network rate files out of a Table of Contents."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="mrf_idx_")
+        cls.path = os.path.join(cls.tmp, "index.json")
+        with open(cls.path, "w", encoding="utf-8") as f:
+            json.dump(INDEX_FIXTURE, f)
+        # gzipped, deliberately NOT named .gz
+        cls.gz = os.path.join(cls.tmp, "index_gz.json")
+        with gzip.open(cls.gz, "wb") as f:
+            f.write(json.dumps(INDEX_FIXTURE).encode("utf-8"))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_deduplicates_files_shared_by_several_structures(self):
+        files, seen = scan_index(self.path, progress_every=0)
+        self.assertEqual(seen, 3)
+        self.assertEqual(len(files), 2, "the PPO file appears twice, count once")
+
+    def test_counts_every_plan_referencing_a_file(self):
+        files, _ = scan_index(self.path, progress_every=0)
+        ppo = files["https://x.com/a/broad_ppo_in-network.json.gz?sig=a"]
+        self.assertEqual(ppo["plans"], 3, "2 plans + 1 plan across 2 structures")
+
+    def test_market_type_is_collected(self):
+        files, _ = scan_index(self.path, progress_every=0)
+        ppo = files["https://x.com/a/broad_ppo_in-network.json.gz?sig=a"]
+        ex = files["https://x.com/a/exchange_narrow_in-network.json.gz"]
+        self.assertEqual(ppo["markets"], {"group"})
+        self.assertEqual(ex["markets"], {"individual"})
+
+    def test_group_filter_excludes_exchange_files(self):
+        files, _ = scan_index(self.path, progress_every=0)
+        kept = [loc for loc, rec in files.items()
+                if matches(loc, rec, "group", None, [])]
+        self.assertEqual(kept,
+                         ["https://x.com/a/broad_ppo_in-network.json.gz?sig=a"])
+
+    def test_contains_filter_matches_plan_names(self):
+        files, _ = scan_index(self.path, progress_every=0)
+        kept = [loc for loc, rec in files.items()
+                if matches(loc, rec, "any", None, ["exchange"])]
+        self.assertEqual(kept,
+                         ["https://x.com/a/exchange_narrow_in-network.json.gz"])
+
+    def test_gzipped_index_named_json_still_scans(self):
+        a, _ = scan_index(self.path, progress_every=0)
+        b, _ = scan_index(self.gz, progress_every=0)
+        self.assertEqual(set(a), set(b))
+
+    def test_args_require_a_source(self):
+        with self.assertRaises(SystemExit):
+            find_files_args([])
+
+    def test_args_reject_a_bad_market(self):
+        with self.assertRaises(SystemExit):
+            find_files_args(["idx.json", "--market", "bogus"])
+
+    def test_contains_collects_multiple_keywords(self):
+        _, market, _, _, _, contains = find_files_args(
+            ["idx.json", "--contains", "PPO", "Open Access", "--market", "group"])
+        self.assertEqual(contains, ["ppo", "open access"])
+        self.assertEqual(market, "group")
 
 
 if __name__ == "__main__":
