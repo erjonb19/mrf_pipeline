@@ -44,6 +44,20 @@ PAYER_FILES = [
     {"payer": "Cigna_NationalPPO", "url": r"https://d25kgz5rikkq4n.cloudfront.net/cost_transparency/mrf/in-network-rates/reporting_month=2026-08/2026-08-01_cigna-health-life-insurance-company_national-ppo_in-network-rates.json.gz?Expires=2106187199&Signature=jZ~657Kk7wjiMWhClpfL8IziYAvhgIOtDWVqlnI28FSN4ix97G~BEWf~1KHjLRMkvqEPoxyRTm6-MfvGPHpGyoC9DO0TlvmRCJi570bQ0-iBILH1zQA4T~1s9uhTZ7LlFTYsDNbYmfP8t5X~EB4FKoTDG58g4k-2iceszrbdMS3vY8VIkbkJeLITDNsHVFu3uHiyXkrxWynwP0NsHzV2AbGL19mdaB-Rb7SALoQLgdno9JvvsaUnQ6ztB5UtMqXaG-AxiZiU5zBck2DMY4cUH8tsKOoXDQ4S2qQExLQrkG0sLn24XeiCOMr7wSonM3OiNpM1zDp3g4jgC7r6vu~7Uw__&Key-Pair-Id=K1NVBEPVH9LWJP"},  # 1.58 GB,    190 plans, PPO
     {"payer": "Cigna_LocalPlus", "url": r"https://d25kgz5rikkq4n.cloudfront.net/cost_transparency/mrf/in-network-rates/reporting_month=2026-08/2026-08-01_cigna-health-life-insurance-company_localplus-with-ebh-plus-pathwell_in-network-rates.json.gz?Expires=2106187199&Signature=HzAFxA3DysoSzxing1jwfisX2xiwTG90htS5XnwCJxY9RgyG04qNRezSvfMfjAhtPS-xEYXHG9zF1gQ~8KsCCIFqpKeVJWX7~lg8EroNLyUQ6HxfoXTOKOj3ZIBHUncptedncbAEQBQMdSR4IImdR7lT7gOotlTzpPdX0X0ikdefn7CerLCUyW77abYG01zFxS5lAL57Ch84qX9fVFsD9Eo7qJwuzCVAc6wWQyGUzyR1lVXrA~6G1u06MCirZ4q4AxFe13RsOwWejl4CDzp3XEwJuM2wIM32PkQGjJnxRiZL5NLcvAeqAogIV9DfHCsv7c4tTk33XkRQxr~dGuR4fw__&Key-Pair-Id=K1NVBEPVH9LWJP"},  # 1,659 plans, Local Plus (narrower)
 
+
+    # --- Aetna Life Insurance Company (employer/EIN plans only) ------------
+    # From the 2026-08-05 ALIC index. That index holds 382 plans, but 376 of
+    # them carry HIOS marketplace ids and names beginning 'Aetna Exchange_'
+    # while still declaring plan_market_type 'group' -- Aetna's market type
+    # cannot be trusted. These 6 are the only ones with a real employer EIN
+    # (066033492). Found with: find_files.py --id-type ein --medical
+    {"payer": "AetnaALIC_OpenAccessElectChoice", "url": r"https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICFI/2026-08-05/inNetworkRates/2026-08-05_pl-4yj-hr23_Aetna-Life-Insurance-Company.json.gz"},  # 3.76 GB, Aetna Open Access Elect Choice_60178
+    {"payer": "AetnaALIC_OpenAccessManagedChoice", "url": r"https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICFI/2026-08-05/inNetworkRates/2026-08-05_pl-53b-hr23-7cc371294e5f9eb289c1cc09f4ab43891dadd9e386371f6fd4448a9e938ccc2f_Aetna-Life-Insurance-Company.json.gz"},  # 6.79 GB, Aetna Open Access Managed Choice_60178
+    {"payer": "AetnaALIC_OpenAccessHealthNetworkOption", "url": r"https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICFI/2026-08-05/inNetworkRates/2026-08-05_pl-196-hr23_Aetna-Life-Insurance-Company.json.gz"},  # ?, Aetna Open Access HealthÂ NetworkÂ Option_60178
+    {"payer": "AetnaALIC_Hmo", "url": r"https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICFI/2026-08-05/inNetworkRates/2026-08-05_pl-2jf-hr23_Aetna-Life-Insurance-Company.json.gz"},  # 0.08 GB, Aetna HMO_60178
+    {"payer": "AetnaALIC_Epo", "url": r"https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICFI/2026-08-05/inNetworkRates/2026-08-05_pl-44p-hr23-8558cc664dc1ab706fd7b71b33e951a3a896391d91031a6bee0b8f61b04a2da0_Aetna-Life-Insurance-Company.json.gz"},  # 3.36 GB, Aetna EPO_60178
+    {"payer": "AetnaALIC_Ppo", "url": r"https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICFI/2026-08-05/inNetworkRates/2026-08-05_pl-4g6-hr23-1c054fd9cca277d346e9d15b5d675b41117c9760a54959900ffbf70ccfe40918_Aetna-Life-Insurance-Company.json.gz"},  # 4.37 GB, Aetna PPO_60170
+
     # --- UnitedHealthcare, New York insurer entity -------------------------
     # All group (employer) market, from the 2026-08-01 index. Sizes are the
     # compressed download. Ordered smallest first so the cheap ones finish

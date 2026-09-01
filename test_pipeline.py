@@ -391,16 +391,37 @@ class TestIndexScan(unittest.TestCase):
             find_files_args(["idx.json", "--market", "bogus"])
 
     def test_contains_collects_multiple_keywords(self):
-        _, market, _, _, _, _, contains = find_files_args(
+        _, market, _, _, _, _, _, contains = find_files_args(
             ["idx.json", "--contains", "PPO", "Open Access", "--market", "group"])
         self.assertEqual(contains, ["ppo", "open access"])
         self.assertEqual(market, "group")
 
     def test_medical_flag_defaults_off(self):
-        _, _, _, _, _, medical, _ = find_files_args(["idx.json"])
+        *_, medical, _ = find_files_args(["idx.json"])
         self.assertFalse(medical)
-        _, _, _, _, _, medical, _ = find_files_args(["idx.json", "--medical"])
+        *_, medical, _ = find_files_args(["idx.json", "--medical"])
         self.assertTrue(medical)
+
+    def test_id_type_parses_and_validates(self):
+        _, _, _, idt, *_ = find_files_args(["idx.json"])
+        self.assertEqual(idt, "any")
+        _, _, _, idt, *_ = find_files_args(["idx.json", "--id-type", "ein"])
+        self.assertEqual(idt, "ein")
+        with self.assertRaises(SystemExit):
+            find_files_args(["idx.json", "--id-type", "bogus"])
+
+    def test_id_type_filter_separates_employer_from_exchange(self):
+        """Aetna labels exchange plans plan_market_type "group", so the id
+        type is the only thing that tells them apart."""
+        ein = {"markets": {"group"}, "id_types": {"ein"},
+               "description": "", "names": []}
+        hios = {"markets": {"group"}, "id_types": {"hios"},
+                "description": "", "names": []}
+        loc = "https://x.com/a/rates.json.gz"
+        self.assertTrue(matches(loc, ein, "group", None, [], id_type="ein"))
+        self.assertFalse(matches(loc, hios, "group", None, [], id_type="ein"))
+        # both still pass the market filter alone -- which is the trap
+        self.assertTrue(matches(loc, hios, "group", None, []))
 
 
 class TestAncillaryFilter(unittest.TestCase):

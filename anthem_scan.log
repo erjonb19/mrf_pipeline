@@ -1,0 +1,27 @@
+Scanning index: https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/2026-09-01_anthem_index.json.gz
+  filter: plan_market_type = group
+  filter: medical networks only (dental/vision/behavioral dropped)
+
+  ... 5,000 reporting structures, 7,156 distinct files
+  ... 10,000 reporting structures, 7,971 distinct files
+  ... 15,000 reporting structures, 8,434 distinct files
+  ... 20,000 reporting structures, 8,695 distinct files
+  ... 25,000 reporting structures, 8,755 distinct files
+  ... 30,000 reporting structures, 9,203 distinct files
+  ... 35,000 reporting structures, 9,242 distinct files
+  ... 40,000 reporting structures, 9,353 distinct files
+  ... 45,000 reporting structures, 9,426 distinct files
+  ... 50,000 reporting structures, 9,498 distinct files
+  ... 55,000 reporting structures, 9,764 distinct files
+  ... 60,000 reporting structures, 9,931 distinct files
+  ... 65,000 reporting structures, 9,961 distinct files
+  ... 70,000 reporting structures, 9,989 distinct files
+  ... 75,000 reporting structures, 10,003 distinct files
+  ... 80,000 reporting structures, 10,031 distinct files
+  ... 85,000 reporting structures, 10,053 distinct files
+  ... 90,000 reporting structures, 10,060 distinct files
+  ... 95,000 reporting structures, 10,093 distinct files
+  ... 100,000 reporting structures, 10,123 distinct files
+  ... 105,000 reporting structures, 10,133 distinct files
+  ... 110,000 reporting structures, 10,144 distinct files
+  ... 115,000 reporting structures, 10,147 distinct files
