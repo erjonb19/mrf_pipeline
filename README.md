@@ -125,8 +125,13 @@ Payer index locations:
 - **UnitedHealthcare** — `transparency-in-coverage.uhc.com`. Not
   `providermrf.uhc.com`, which serves Medicaid provider directories and drug
   formularies under a different regulation and contains no rates.
-- **Anthem/Empire** — the index is a direct S3 object, e.g.
-  `antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/<date>_anthem_index.json.gz`
+- **Anthem/Empire** — the index is a direct S3 object:
+  `https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/<date>_anthem_index.json.gz`
+  The date moves and only the current month is served. The bucket denies
+  listing, so a stale date returns `403 AccessDenied` rather than 404 — that
+  means "wrong filename", not "forbidden". Walk the date forward a month at a
+  time until one returns 200. Verified 2026-08-31:
+  `2026-09-01_anthem_index.json.gz`, 10.65 GB.
 - **Cigna** — `cigna.com/legal/compliance/machine-readable-files`
 
 ## System attribution
