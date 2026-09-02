@@ -1,7 +1,0 @@
-[22:34:00] ijson backend: yajl2_c
-[22:34:00] loaded 940 target NPIs
-[22:34:00] === Aetna_NY ===
-[22:34:00]   already parsed: payer_parquet\Aetna_NY.parquet (skipping)
-[22:34:00] === Cigna_PathwellOAP ===
-[22:34:00]   cached: 2026-08-01_cigna-health-life-insurance-company_pathwell-oap_in-network-rates.json.gz (1.59 GB)
-[22:34:00]   pass 1: provider references...
