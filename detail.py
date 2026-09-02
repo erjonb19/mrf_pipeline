@@ -99,7 +99,8 @@ def main(argv):
 
     cols = """payer, systems, system_count, billing_code, code_type,
               description, billing_class, rate_type, negotiated_rate,
-              service_codes, expiration_date, matched_npis, tins"""
+              service_codes, expiration_date, matched_npis, matched_tins,
+              group_tins"""
     order = "billing_code, systems, billing_class, rate_type, negotiated_rate"
 
     # cheap count first (no materialization)

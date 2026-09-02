@@ -26,7 +26,7 @@ import unittest
 import pandas as pd
 
 from mrf_parser import build_relevant_groups, stream_filtered_rates, open_source
-from run_pipeline import systems_for, cache_name, parse_one
+from run_pipeline import load_target_tins, systems_for, cache_name, parse_one
 from find_files import (scan_index, matches, is_ancillary,
                         parse_args as find_files_args)
 
@@ -248,6 +248,74 @@ class TestSystemAttribution(unittest.TestCase):
                          systems_for("1111111111,2222222222", NPI_TO_SYSTEM))
 
 
+class TestTinMatching(FixtureCase):
+    """
+    Group 2 / NPI 9999999999 is not a target NPI, so NPI matching drops it.
+    Its tax ID 999999999 as a target TIN must bring it back -- in both the
+    referenced (variant A) and inline (variant B) shapes -- and attribute
+    it to the TIN's system.
+    """
+    TINS = frozenset({"999999999"})
+    TIN_TO_SYSTEM = {"999999999": "System C"}
+
+    def test_pass_one_keeps_group_by_tin(self):
+        rel = build_relevant_groups(self.plain, TARGET_NPIS, self.TINS)
+        self.assertIn("2", rel)
+        self.assertEqual(rel["2"]["matched_tins"], "999999999")
+        self.assertEqual(rel["2"]["npis"], "")        # no NPI hit, TIN only
+        self.assertEqual(rel["1"]["matched_tins"], "")  # NPI hit, no TIN
+
+    def test_pass_one_records_group_sizes_for_every_group(self):
+        sizes = {}
+        build_relevant_groups(self.plain, TARGET_NPIS, group_sizes=sizes)
+        self.assertEqual(sizes, {"1": 1, "2": 1})
+
+    def test_pass_two_emits_tin_matched_rows_both_variants(self):
+        sizes = {}
+        rel = build_relevant_groups(self.plain, TARGET_NPIS, self.TINS,
+                                    group_sizes=sizes)
+        rows = list(stream_filtered_rates(self.plain, rel, TARGET_NPIS,
+                                          self.TINS, group_sizes=sizes))
+        rates = sorted(r["negotiated_rate"] for r in rows)
+        self.assertEqual(rates, [42.0, 75.0, 500.0, 1000.0])
+        by_rate = {r["negotiated_rate"]: r for r in rows}
+        self.assertEqual(by_rate[500.0]["matched_tins"], "999999999")   # A
+        self.assertEqual(by_rate[500.0]["matched_npis"], "")
+        self.assertEqual(by_rate[42.0]["matched_tins"], "999999999")    # B
+        self.assertEqual(by_rate[1000.0]["matched_tins"], "")
+        for r in rows:
+            self.assertEqual(r["group_tins"], 1)
+
+    def test_no_target_tins_is_unchanged_behaviour(self):
+        rel = build_relevant_groups(self.plain, TARGET_NPIS)
+        rows = list(stream_filtered_rates(self.plain, rel, TARGET_NPIS))
+        self.assertEqual(sorted(r["negotiated_rate"] for r in rows),
+                         [75.0, 1000.0])
+
+    def test_attribution_unions_npi_and_tin_systems(self):
+        self.assertEqual(
+            systems_for("1111111111", NPI_TO_SYSTEM, "999999999",
+                        self.TIN_TO_SYSTEM),
+            "System A,System C")
+        self.assertEqual(
+            systems_for("", NPI_TO_SYSTEM, "999999999", self.TIN_TO_SYSTEM),
+            "System C")
+        self.assertEqual(systems_for("", NPI_TO_SYSTEM, "", None), "")
+
+    def test_load_target_tins_reads_only_include_y(self):
+        path = os.path.join(self.tmp, "tins.csv")
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write("include,system,tin,entity\n"
+                    "Y,System C,999999999,Hosp C\n"
+                    "?,System D,888888888,maybe\n"
+                    "N,System E,777777777,no\n"
+                    "y ,System F, 666666666 ,lowercase and spaces\n")
+        self.assertEqual(load_target_tins(path),
+                         {"999999999": "System C", "666666666": "System F"})
+        self.assertEqual(load_target_tins(os.path.join(self.tmp, "nope.csv")),
+                         {})
+
+
 class TestCacheName(unittest.TestCase):
     """Signed payer URLs must not produce illegal Windows filenames."""
 
@@ -287,6 +355,35 @@ class TestParseOneEndToEnd(FixtureCase):
         visit = df[df["billing_code"] == "99213"].iloc[0]
         self.assertEqual(visit["systems"], "System A")
         self.assertEqual(visit["system_count"], 1)
+        self.assertFalse(os.path.exists(out + ".part"))
+
+    def test_tin_matching_adds_rows_and_attributes_by_tin(self):
+        out = os.path.join(self.tmp, "TestTin.parquet")
+        n = parse_one("TestTin", self.plain, TARGET_NPIS, NPI_TO_SYSTEM, out,
+                      tin_to_system={"999999999": "System C"})
+        self.assertEqual(n, 4)
+        df = pd.read_parquet(out)
+        c = df[df["matched_tins"] == "999999999"]
+        self.assertEqual(len(c), 2)
+        self.assertTrue((c["systems"] == "System C").all())
+        self.assertNotIn("tins", df.columns,
+                         "the full per-row TIN list is gone (memory)")
+        self.assertIn("group_tins", df.columns)
+
+    def test_chunked_writes_produce_one_complete_file(self):
+        import run_pipeline
+        out = os.path.join(self.tmp, "TestChunk.parquet")
+        old = run_pipeline.CHUNK_ROWS
+        run_pipeline.CHUNK_ROWS = 1  # force a flush per row
+        try:
+            n = parse_one("TestChunk", self.plain, TARGET_NPIS,
+                          NPI_TO_SYSTEM, out)
+        finally:
+            run_pipeline.CHUNK_ROWS = old
+        self.assertEqual(n, 2)
+        df = pd.read_parquet(out)
+        self.assertEqual(len(df), 2)
+        self.assertEqual(sorted(df["billing_code"]), ["27447", "99213"])
 
 
 INDEX_FIXTURE = {

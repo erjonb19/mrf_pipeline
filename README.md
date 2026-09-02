@@ -12,9 +12,11 @@ resumable after a crash, and caches downloads so you never re-stream a file.
 For each payer file in `config.py`, it:
 
 1. Downloads the file once to `mrf_cache/` (skips if already present).
-2. Runs a two-pass, NPI-filtered parser (schema 2.0).
-   - Pass 1: keep only provider groups containing a target NPI.
-   - Pass 2: emit only rate rows touching a target provider.
+2. Runs a two-pass, filtered parser (schema 2.0).
+   - Pass 1: keep only provider groups containing a target NPI **or billed
+     under a target tax ID** (see "Why tax IDs" below).
+   - Pass 2: emit only rate rows touching a kept group, written to Parquet
+     in chunks as they stream.
 3. Writes a compact Parquet file to `payer_parquet/` (skips if already done).
 
 Then `analyze.py` queries all the Parquet with DuckDB to produce rate
@@ -33,6 +35,8 @@ startup and falls back to pure Python if needed.
 ## Files
 
 - `config.py`            — edit this. Target CSV path, payer file list, dirs.
+- `target_tins.csv`      — reviewed tax-ID list, one row per legal entity.
+                           Only `include=Y` rows are matched.
 - `find_files.py`        — pick broad-network rate files out of a payer's
                            Table of Contents. `python find_files.py <index_url>`
 - `mrf_parser.py`        — core two-pass parser (don't need to touch).
@@ -47,7 +51,8 @@ startup and falls back to pure Python if needed.
 ## Run
 
 1. Put your `target_providers.csv` (the 940 NPIs from step 1) in this folder,
-   or point `config.TARGET_CSV` at it.
+   or point `config.TARGET_CSV` at it. Review `target_tins.csv` (below) —
+   without it the pipeline runs NPI-only and finds ~10% of the hospitals.
 
 2. Edit `config.PAYER_FILES` with the payer in-network file URLs. Use
    `find_files.py` to pick them (see "Choosing the right file" below) —
@@ -57,6 +62,13 @@ startup and falls back to pure Python if needed.
 3. Parse:
    ```bash
    python run_pipeline.py
+
+   # fetch everything into the cache first, parse later (downloads are
+   # reusable across parser changes; parses are not):
+   python run_pipeline.py --download-only
+
+   # one payer only, e.g. to trial a change against a cached file:
+   python run_pipeline.py --only Cigna_PathwellOAP
 
    # trialling a payer you just added? cap pass 2 so you find out in
    # minutes whether the file yields usable rows:
@@ -70,6 +82,8 @@ startup and falls back to pure Python if needed.
    python analyze.py                 # everything
    python analyze.py 27447 99213     # specific billing codes
    python analyze.py --export 27447  # also write clean_comparison.csv
+   python analyze.py --max-tins 10 27447   # system contracts only (see
+                                           # "Contract vs fee schedule")
    ```
 
 5. Inspect the rows behind a number:
@@ -134,6 +148,43 @@ Payer index locations:
   `2026-09-01_anthem_index.json.gz`, 10.65 GB.
 - **Cigna** — `cigna.com/legal/compliance/machine-readable-files`
 
+## Why tax IDs
+
+The first runs matched on the 940 NPIs alone and found 13% of them in
+Aetna, 9% in Cigna — and 139 of the acute-care hospitals in none. The
+hospitals *were* in the files: Montefiore Medical Center sits in Cigna's
+directory under 3,596 NPIs, of which the NPPES-derived target list held 6.
+Payers list a hospital under the NPIs they credential, which is not what a
+registry name search returns.
+
+Every provider group in an MRF carries the tax ID (EIN) it bills under, and
+a hospital has a handful of those. So pass 1 also keeps any group billed
+under a TIN in `target_tins.csv`, and a row's `systems` is the union of the
+systems its matched NPIs and matched TINs belong to.
+
+`target_tins.csv` was built by scanning the payer directories for business
+names resembling the seven systems, then checking each TIN's NPIs against
+NPPES (organization name and state). It has an `include` column:
+
+| value | meaning |
+| ----- | ------- |
+| `Y`   | matched. Hospital entities and clearly-owned physician groups. |
+| `?`   | name matched but ownership was not verified. Ignored. |
+| `N`   | a different organization (UPMC Presbyterian, Mount Sinai Chicago, WESTMED). Ignored. |
+
+Edit the `include` column to change what counts as each system; don't edit
+`tin`. Changing it means re-parsing (delete the Parquet).
+
+## Contract vs fee schedule
+
+Some provider groups are enormous — one Aetna group spans 15,824 tax IDs.
+A rate attached to that group is the payer's standard fee schedule that
+everyone in the network gets, not a contract with any one system. Both are
+genuinely "what the payer pays the system", but they answer different
+questions, so every row carries `group_tins`: how many distinct tax IDs
+share that rate. `analyze.py` prints the breakdown and `--max-tins N`
+restricts the comparison to rates shared by at most N tax IDs.
+
 ## System attribution
 
 One negotiated rate can apply to a provider group spanning several systems.
@@ -160,13 +211,9 @@ shared provider groups and should be read with care.
 `detail.py --system X` returns rows *touching* X, including shared ones; add
 `--exclusive` to drop the shared rows.
 
-> Parquet written before this fix carries a single `system` column instead.
-> `analyze.py` and `detail.py` will refuse to run and tell you to fix it:
-> ```bash
-> python backfill_systems.py --dry-run   # report, change nothing
-> python backfill_systems.py             # rewrite, keeping .bak copies
-> ```
-> No re-parse is needed — the correction is derivable from `matched_npis`.
+> Parquet written before TIN matching lacks `group_tins` and `matched_tins`;
+> `analyze.py` refuses it. Delete and re-parse. (`backfill_systems.py`
+> repairs the older single-`system` layout, but cannot add TIN columns.)
 
 ## If a file returns 0 rows
 
@@ -187,16 +234,18 @@ broader-network file) or whether there's a structural quirk to handle.
 python -m unittest test_pipeline -v
 ```
 
-28 tests against synthetic in-network and index fixtures: both
-provider-group shapes, multi-system attribution, the `negotiated_value`
-fallback, gzip detection, filename sanitising, and index filtering. They need
-no network and no payer data — run them before and after touching
-`mrf_parser.py`.
+43 tests against synthetic in-network and index fixtures: both
+provider-group shapes, NPI and TIN matching, multi-system attribution,
+`group_tins`, chunked Parquet writing, the `negotiated_value` fallback, gzip
+detection, filename sanitising, and index filtering. They need no network
+and no payer data — run them before and after touching `mrf_parser.py`.
 
 ## Notes
 
-- Output rows carry `payer`, `systems`, `matched_npis`, and `tins` columns,
-  so payer-side and hospital-side data join on NPI/TIN + billing_code later.
+- Output rows carry `payer`, `systems`, `matched_npis`, `matched_tins` and
+  `group_tins`, so payer-side and hospital-side data join on NPI/TIN +
+  billing_code later. The full TIN list of a group is *not* stored: at
+  15,000 TINs per network-wide group it cost 14 GB of strings for one payer.
 - Compression is detected from the file's first two bytes, not its
   extension — payers serve plain JSON from `.gz` URLs and vice versa.
 - Signed payer URLs (Azure/S3) carry query strings full of characters
@@ -205,7 +254,9 @@ no network and no payer data — run them before and after touching
   Set it False to stream URLs directly without caching.
 - The pipeline is safe to re-run. It skips any payer whose Parquet already
   exists, so you can add payers incrementally.
-- `analyze.py` filters to `rate_type = 'negotiated' AND negotiated_rate > 1`.
-  That currently drops ~30% of rows, mostly `fee schedule` entries priced at
-  or below $1 (percentage-of-charge placeholders) — but also some real
-  dollar amounts. Revisit that filter if fee-schedule rates matter to you.
+- `analyze.py` filters to `rate_type <> 'percentage' AND negotiated_rate > 1`.
+  `percentage` rows are a percent of billed charges (a "50" is 50%, not
+  $50) and rows at or below $1 are placeholders. Everything else is a
+  dollar amount — `fee schedule` included: Cigna labels 95% of its rows
+  that way at a median of ~$500, so the earlier `negotiated`-only filter
+  threw Cigna away almost entirely.

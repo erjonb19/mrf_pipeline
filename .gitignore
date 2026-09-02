@@ -11,3 +11,10 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Working files
+*.log
+*.err
+*.bak
+target_tins_draft.csv
+cigna_tin_candidates.csv

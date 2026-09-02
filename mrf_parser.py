@@ -123,10 +123,23 @@ def open_source(path_or_url):
     return f, f.close
 
 
-def build_relevant_groups(path_or_url, target_npis, progress=None):
+def build_relevant_groups(path_or_url, target_npis, target_tins=frozenset(),
+                          progress=None, group_sizes=None):
     """
-    Pass 1. Return {provider_group_id(str): {'npis': csv, 'tins': csv}} for
-    only the groups that contain at least one target NPI.
+    Pass 1. Return {provider_group_id(str): {'npis': csv, 'tins': csv,
+    'matched_tins': csv}} for only the groups that contain at least one
+    target NPI or are billed under a target TIN.
+
+    Matching on TIN is what makes this work: the NPIs a payer lists for a
+    hospital are rarely the ones an NPPES name search returns, but every
+    provider group carries the tax ID it bills under, and a hospital has a
+    handful of those.
+
+    group_sizes, if given, is a dict this fills with
+    {provider_group_id: number of distinct TINs} for EVERY group, relevant
+    or not. Pass 2 uses it to say how many tax IDs share a rate -- a rate
+    shared by 15,000 TINs is the payer's standard fee schedule, not a
+    contract with one system.
 
     progress, if given, is called as progress(seen, kept) per item. Pass 1
     reads the whole provider_references block before pass 2 can start, which
@@ -149,11 +162,15 @@ def build_relevant_groups(path_or_url, target_npis, progress=None):
                 t = g.get("tin")
                 if isinstance(t, dict) and t.get("value"):
                     tins.add(str(t["value"]))
+            if group_sizes is not None:
+                group_sizes[str(gid)] = len(tins)
             hit = npis & target_npis
-            if hit:
+            tin_hit = tins & target_tins
+            if hit or tin_hit:
                 relevant[str(gid)] = {
                     "npis": ",".join(sorted(hit)),
                     "tins": ",".join(sorted(tins)),
+                    "matched_tins": ",".join(sorted(tin_hit)),
                 }
             if progress:
                 progress(seen, len(relevant))
@@ -164,12 +181,20 @@ def build_relevant_groups(path_or_url, target_npis, progress=None):
 
 
 def stream_filtered_rates(path_or_url, relevant_groups, target_npis,
-                          max_records=None, progress=None):
+                          target_tins=frozenset(), max_records=None,
+                          progress=None, group_sizes=None):
     """
     Pass 2. Yield flat rate dicts for rows touching any target provider,
     via references (variant A) or inline provider_groups (variant B).
+
+    Each row carries `group_tins`: how many distinct tax IDs the rate is
+    shared with, summed over the provider groups it references (needs
+    group_sizes from pass 1; 0 when not available). The TINs themselves are
+    not emitted: a network-wide group can hold 15,000 of them, and carrying
+    that list on every row cost 14 GB of strings for one payer.
     """
     src, closer = open_source(path_or_url)
+    sizes = group_sizes or {}
     n = 0
     try:
         events = _events_until_end_of(ijson.parse(src), "in_network")
@@ -178,28 +203,34 @@ def stream_filtered_rates(path_or_url, relevant_groups, target_npis,
             ct = item.get("billing_code_type", "")
             desc = item.get("description", "")
             for rg in item.get("negotiated_rates", []):
-                m_npis, m_tins = set(), set()
+                m_npis, hit_tins = set(), set()
+                width = 0
 
                 # variant A: references into the provider_references block
                 for ref in rg.get("provider_references", []):
                     rs = str(ref)
+                    width += sizes.get(rs, 0)
                     g = relevant_groups.get(rs)
                     if g:
-                        m_npis.update(g["npis"].split(","))
-                        if g["tins"]:
-                            m_tins.update(g["tins"].split(","))
+                        if g["npis"]:
+                            m_npis.update(g["npis"].split(","))
+                        if g.get("matched_tins"):
+                            hit_tins.update(g["matched_tins"].split(","))
 
                 # variant B: inline provider_groups
                 for g in rg.get("provider_groups", []):
+                    t = g.get("tin")
+                    tv = str(t["value"]) if isinstance(t, dict) and t.get("value") else ""
+                    if tv:
+                        width += 1
                     gn = {str(x) for x in g.get("npi", [])}
                     hit = gn & target_npis
-                    if hit:
+                    if hit or tv in target_tins:
                         m_npis.update(hit)
-                        t = g.get("tin")
-                        if isinstance(t, dict) and t.get("value"):
-                            m_tins.add(str(t["value"]))
+                        if tv in target_tins:
+                            hit_tins.add(tv)
 
-                if not m_npis:
+                if not m_npis and not hit_tins:
                     continue
 
                 for pi in rg.get("negotiated_prices", []):
@@ -219,7 +250,8 @@ def stream_filtered_rates(path_or_url, relevant_groups, target_npis,
                         "service_codes": "|".join(sc) if isinstance(sc, list) else str(sc),
                         "expiration_date": pi.get("expiration_date", ""),
                         "matched_npis": ",".join(sorted(m_npis)),
-                        "tins": ",".join(sorted(m_tins)),
+                        "matched_tins": ",".join(sorted(hit_tins)),
+                        "group_tins": width,
                     }
                     n += 1
             if progress:

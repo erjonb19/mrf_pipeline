@@ -4,6 +4,8 @@ Pipeline configuration. Edit this file, not the others.
 
 # Path to the anchor list from step 1 (940 target NPIs).
 TARGET_CSV = "target_providers.csv"
+# Reviewed tax-ID list: only rows with include=Y are matched. See README.
+TARGET_TINS_CSV = "target_tins.csv"
 
 # Where downloaded raw MRF files are cached, and where parquet output lands.
 CACHE_DIR = "mrf_cache"
