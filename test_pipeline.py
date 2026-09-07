@@ -16,18 +16,27 @@ actually bite in real payer data:
   * gzipped and plain files behind the same code path
 """
 
+import contextlib
 import gzip
+import io
 import json
 import os
 import shutil
 import tempfile
 import unittest
+import urllib.error
+from unittest import mock
 
 import pandas as pd
+import requests
 
+import config
+import validate
 from mrf_parser import (build_relevant_groups, stream_filtered_rates,
-                        open_source, read_header, _network_names)
-from run_pipeline import load_target_tins, systems_for, cache_name, parse_one
+                        open_source, read_header, _network_names,
+                        is_transient, retry, TruncatedDownload, BACKOFF_CAP)
+from run_pipeline import (load_target_tins, systems_for, cache_name,
+                          parse_one, download_once)
 from find_files import (scan_index, matches, is_ancillary,
                         parse_args as find_files_args)
 
@@ -658,6 +667,386 @@ class TestHeaderAndMetadata(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["network_names"],
                          "Aetna Select|Open Access Elect Choice")
+
+
+class TestRetryPolicy(unittest.TestCase):
+    """
+    Which failures earn another attempt, and how many.
+
+    The distinction that matters: a 503 from an overloaded CDN is worth
+    waiting out, an expired signed URL's 403 is not, and retrying the latter
+    only turns a clear error into a slow one.
+    """
+
+    @staticmethod
+    def http_error(code):
+        return urllib.error.HTTPError("http://x/f.gz", code, "msg", {}, None)
+
+    def test_overload_and_throttling_are_transient(self):
+        for code in (408, 429, 500, 502, 503, 504):
+            self.assertTrue(is_transient(self.http_error(code)), code)
+
+    def test_permanent_http_errors_are_not(self):
+        for code in (400, 401, 403, 404, 410):
+            self.assertFalse(is_transient(self.http_error(code)), code)
+
+    def test_socket_level_failures_are_transient(self):
+        self.assertTrue(is_transient(requests.exceptions.ConnectionError()))
+        self.assertTrue(is_transient(requests.exceptions.Timeout()))
+        self.assertTrue(is_transient(ConnectionResetError()))
+        self.assertTrue(is_transient(TruncatedDownload("short")))
+
+    def test_a_bug_is_not_transient(self):
+        self.assertFalse(is_transient(ValueError("bad json")))
+        self.assertFalse(is_transient(KeyError("missing")))
+
+    def test_succeeds_after_transient_failures(self):
+        calls, sleeps = [], []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) < 3:
+                raise requests.exceptions.ConnectionError("reset")
+            return "done"
+
+        self.assertEqual(
+            retry(flaky, "fetch", log=None, sleep=sleeps.append), "done")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [2.0, 4.0])      # exponential, not flat
+
+    def test_gives_up_and_reraises(self):
+        calls = []
+
+        def always():
+            calls.append(1)
+            raise requests.exceptions.Timeout("slow")
+
+        with self.assertRaises(requests.exceptions.Timeout):
+            retry(always, "fetch", attempts=3, log=None, sleep=lambda s: None)
+        self.assertEqual(len(calls), 3)
+
+    def test_permanent_failure_is_not_slept_on(self):
+        calls, sleeps = [], []
+
+        def bad():
+            calls.append(1)
+            raise self.http_error(404)
+
+        with self.assertRaises(urllib.error.HTTPError):
+            retry(bad, "fetch", log=None, sleep=sleeps.append)
+        self.assertEqual(len(calls), 1)   # no second attempt
+        self.assertEqual(sleeps, [])
+
+    def test_backoff_is_capped(self):
+        sleeps = []
+
+        def always():
+            raise requests.exceptions.ConnectionError("reset")
+
+        with self.assertRaises(requests.exceptions.ConnectionError):
+            retry(always, "fetch", attempts=8, log=None, sleep=sleeps.append)
+        self.assertTrue(max(sleeps) <= BACKOFF_CAP, sleeps)
+
+
+class FakeResponse:
+    """Minimal stand-in for a urlopen result."""
+
+    def __init__(self, body, status=200, claim_length=None):
+        self._body = body
+        self._pos = 0
+        self.status = status
+        length = len(body) if claim_length is None else claim_length
+        self.headers = {"Content-Length": str(length)}
+
+    def read(self, n):
+        chunk = self._body[self._pos:self._pos + n]
+        self._pos += len(chunk)
+        return chunk
+
+    def getcode(self):
+        return self.status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+BODY = b"0123456789abcdef"
+
+
+class TestResumableDownload(unittest.TestCase):
+    """
+    A dropped connection must not cost the bytes already on disk.
+
+    These files reach 15 GB. Restarting from zero at 12 GB was the old
+    behaviour and it is the difference between a two-minute recovery and an
+    hour of re-downloading.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mrf_dl_")
+        self.url = "https://payer.example/mrf/rates.json.gz"
+        self.local = os.path.join(self.tmp, cache_name(self.url))
+        self.part = self.local + ".part"
+        self.requests_seen = []
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_download(self, responses):
+        """Patch urlopen to return `responses` in order; return the bytes."""
+        pending = list(responses)
+
+        def fake_urlopen(req, timeout=None):
+            self.requests_seen.append(req.headers.get("Range"))
+            return pending.pop(0)
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen), \
+                mock.patch("mrf_parser.time.sleep"):
+            path = download_once(self.url, self.tmp)
+        with open(path, "rb") as f:
+            return f.read()
+
+    def test_plain_download_writes_the_whole_file(self):
+        self.assertEqual(self.run_download([FakeResponse(BODY)]), BODY)
+        self.assertEqual(self.requests_seen, [None])   # no Range on a fresh get
+        self.assertFalse(os.path.exists(self.part))    # renamed, not left behind
+
+    def test_resumes_from_a_partial_file(self):
+        with open(self.part, "wb") as f:
+            f.write(BODY[:6])
+        got = self.run_download([FakeResponse(BODY[6:], status=206)])
+        self.assertEqual(got, BODY)
+        self.assertEqual(self.requests_seen, ["bytes=6-"])
+
+    def test_server_ignoring_range_restarts_cleanly(self):
+        # A 200 to a ranged request means the whole file is coming again, so
+        # appending it to the partial would produce a corrupt double-length
+        # file. It must truncate instead.
+        with open(self.part, "wb") as f:
+            f.write(BODY[:6])
+        got = self.run_download([FakeResponse(BODY, status=200)])
+        self.assertEqual(got, BODY)
+
+    def test_truncated_download_is_retried_and_resumed(self):
+        short = FakeResponse(BODY[:6], status=200, claim_length=len(BODY))
+        rest = FakeResponse(BODY[6:], status=206)
+        self.assertEqual(self.run_download([short, rest]), BODY)
+        self.assertEqual(self.requests_seen, [None, "bytes=6-"])
+
+    def test_a_cached_file_is_not_downloaded_again(self):
+        with open(self.local, "wb") as f:
+            f.write(BODY)
+
+        def explode(req, timeout=None):
+            raise AssertionError("should not have hit the network")
+
+        with mock.patch("urllib.request.urlopen", explode):
+            self.assertEqual(download_once(self.url, self.tmp), self.local)
+
+
+def validation_frame(**override):
+    """Three clean rows carrying every column of the contract."""
+    df = pd.DataFrame({
+        "billing_code": ["27447", "99213", "27447"],
+        "code_type": ["CPT"] * 3,
+        "description": ["KNEE", "OFFICE VISIT", "KNEE"],
+        "negotiated_rate": [1000.0, 120.0, 1500.0],
+        "rate_type": ["negotiated"] * 3,
+        "billing_class": ["institutional"] * 3,
+        "service_codes": ["21", "11", "21"],
+        "expiration_date": ["9999-12-31"] * 3,
+        "matched_npis": ["1111111111", "", "1111111111"],
+        "matched_tins": ["111111111"] * 3,
+        "group_tins": [1, 4, 1],
+        "network_names": ["Net A"] * 3,
+        "payer": ["TestPayer"] * 3,
+        "reporting_entity_name": ["Test Co"] * 3,
+        "last_updated_on": ["2026-08-05"] * 3,
+        "schema_version": ["2.0.0"] * 3,
+        "systems": ["SystemOne"] * 3,
+        "system_count": [1, 1, 1],
+    })
+    for col, values in override.items():
+        df[col] = values
+    return df
+
+
+class ValidationCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mrf_val_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write(self, payer, df):
+        path = os.path.join(self.tmp, payer + ".parquet")
+        df.to_parquet(path, index=False)
+        return path
+
+    def findings(self, df, payer="TestPayer", expect_month=None,
+                 majority_month=None):
+        path = self.write(payer, df)
+        f, _, _ = validate.validate_file(path, payer, False, expect_month,
+                                         majority_month)
+        return f
+
+    def assertFails(self, f, check):
+        hits = [c for lvl, c, _ in f.items if lvl == validate.FAIL]
+        self.assertIn(check, hits, f.items)
+
+    def assertWarns(self, f, check):
+        hits = [c for lvl, c, _ in f.items if lvl == validate.WARN]
+        self.assertIn(check, hits, f.items)
+
+
+class TestValidateFile(ValidationCase):
+    """The per-file checks in validate.py."""
+
+    def test_a_clean_file_produces_nothing(self):
+        f = self.findings(validation_frame())
+        self.assertEqual(f.count(validate.FAIL), 0, f.items)
+        self.assertEqual(f.count(validate.WARN), 0, f.items)
+
+    def test_missing_column_fails(self):
+        f = self.findings(validation_frame().drop(columns=["network_names"]))
+        self.assertFails(f, "schema")
+
+    def test_unexpected_column_fails(self):
+        df = validation_frame()
+        df["surprise"] = 1
+        self.assertFails(self.findings(df), "schema")
+
+    def test_wrong_type_fails(self):
+        # group_tins as a float would silently break any integer comparison
+        f = self.findings(validation_frame(group_tins=[1.0, 4.0, 1.0]))
+        self.assertFails(f, "schema")
+
+    def test_blank_join_key_fails(self):
+        f = self.findings(validation_frame(billing_code=["27447", "", "27447"]))
+        self.assertFails(f, "join_keys")
+
+    def test_row_naming_no_provider_fails(self):
+        f = self.findings(validation_frame(
+            matched_npis=["1111111111", "", "1111111111"],
+            matched_tins=["111111111", "", "111111111"]))
+        self.assertFails(f, "provider_identity")
+
+    def test_null_and_negative_rates_fail(self):
+        self.assertFails(
+            self.findings(validation_frame(
+                negotiated_rate=[1000.0, None, 1500.0])), "rates")
+        self.assertFails(
+            self.findings(validation_frame(
+                negotiated_rate=[1000.0, -5.0, 1500.0])), "rates")
+
+    def test_mostly_zero_rates_warn(self):
+        f = self.findings(validation_frame(negotiated_rate=[0.0, 0.0, 0.0]))
+        self.assertWarns(f, "rates")
+
+    def test_all_blank_required_column_fails(self):
+        # This is the network_names class of bug, on a column that must
+        # never be empty.
+        f = self.findings(validation_frame(systems=["", "", ""]))
+        self.assertFails(f, "blank_column")
+
+    def test_all_blank_optional_column_only_warns(self):
+        # network_names is legitimately empty on files parsed before the
+        # column existed, so it must not fail a run that is otherwise fine.
+        f = self.findings(validation_frame(network_names=["", "", ""]))
+        self.assertWarns(f, "blank_column")
+        self.assertEqual(f.count(validate.FAIL), 0, f.items)
+
+    def test_a_column_blank_on_some_rows_is_fine(self):
+        f = self.findings(validation_frame())   # matched_npis blank on row 2
+        self.assertEqual(f.count(validate.WARN), 0, f.items)
+
+    def test_payer_not_matching_the_filename_fails(self):
+        f = self.findings(validation_frame(payer=["Other"] * 3))
+        self.assertFails(f, "constants")
+
+    def test_two_reporting_dates_in_one_file_fails(self):
+        f = self.findings(validation_frame(
+            last_updated_on=["2026-08-05", "2026-06-05", "2026-08-05"]))
+        self.assertFails(f, "constants")
+
+    def test_wrong_expected_month_fails(self):
+        f = self.findings(validation_frame(), expect_month="2026-09")
+        self.assertFails(f, "as_of")
+
+    def test_right_expected_month_passes(self):
+        f = self.findings(validation_frame(), expect_month="2026-08")
+        self.assertEqual(f.count(validate.FAIL), 0, f.items)
+
+    def test_file_behind_its_siblings_warns(self):
+        # Aetna_NY published 2026-06 while the rest of the dataset was
+        # 2026-08; the rates look valid and are simply two months old.
+        f = self.findings(validation_frame(), majority_month="2026-09")
+        self.assertWarns(f, "as_of")
+
+    def test_empty_file_fails(self):
+        f = self.findings(validation_frame().iloc[0:0])
+        self.assertFails(f, "nonempty")
+
+
+class TestDuplicateDetection(ValidationCase):
+    """
+    Telling a republished file apart from a genuinely different product.
+
+    Measured on the real dataset: Cigna's National and Pathwell files differ
+    in network_names alone, while UnitedHealthcare's ChoicePlus and ChoiceEPO
+    share a row count and a rate total but differ in group_tins. Only the
+    first pair is a duplicate.
+    """
+
+    def run_main(self, *args):
+        out = io.StringIO()
+        with mock.patch.object(config, "OUTPUT_DIR", self.tmp), \
+                contextlib.redirect_stdout(out):
+            try:
+                validate.main(list(args))
+            except SystemExit:
+                pass
+        return out.getvalue()
+
+    def test_same_rates_under_two_network_labels_is_flagged(self):
+        self.write("PayerA", validation_frame(payer=["PayerA"] * 3))
+        self.write("PayerB", validation_frame(payer=["PayerB"] * 3,
+                                              network_names=["Net B"] * 3))
+        out = self.run_main("--quiet")
+        self.assertIn("duplicate_files", out)
+        self.assertIn("differing only in network_names", out)
+
+    def test_different_group_breadth_is_not_a_duplicate(self):
+        self.write("PayerA", validation_frame(payer=["PayerA"] * 3))
+        self.write("PayerB", validation_frame(payer=["PayerB"] * 3,
+                                              network_names=["Net B"] * 3,
+                                              group_tins=[9, 9, 9]))
+        self.assertNotIn("duplicate_files", self.run_main("--quiet"))
+
+    def test_strict_turns_warnings_into_a_failing_exit(self):
+        self.write("PayerA", validation_frame(payer=["PayerA"] * 3,
+                                              network_names=["", "", ""]))
+        with mock.patch.object(config, "OUTPUT_DIR", self.tmp), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                validate.main(["--strict"])
+
+    def test_a_failure_exits_non_zero(self):
+        self.write("PayerA", validation_frame(payer=["PayerA"] * 3,
+                                              systems=["", "", ""]))
+        with mock.patch.object(config, "OUTPUT_DIR", self.tmp), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                validate.main([])
+
+    def test_clean_dataset_exits_zero(self):
+        self.write("PayerA", validation_frame(payer=["PayerA"] * 3))
+        with mock.patch.object(config, "OUTPUT_DIR", self.tmp), \
+                contextlib.redirect_stdout(io.StringIO()):
+            validate.main([])      # no SystemExit
 
 
 if __name__ == "__main__":

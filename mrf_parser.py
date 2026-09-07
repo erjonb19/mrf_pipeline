@@ -15,6 +15,9 @@ Designed to read from a local .json, local .json.gz, or remote .json.gz URL.
 import gzip
 import io
 import re
+import socket
+import time
+import urllib.error
 
 import requests
 
@@ -89,7 +92,84 @@ HTTP_HEADERS = {
 }
 
 
-def open_source(path_or_url):
+# Retry policy. Every source here is a multi-GB file from a payer CDN, and
+# those fail transiently often enough that a single-shot GET throws away
+# hours of work over a few seconds of network trouble. Bounded, because the
+# other half of the failures are permanent: a signed URL that has expired
+# returns 403 no matter how politely you ask again.
+MAX_ATTEMPTS = 4
+BACKOFF_BASE = 2.0     # seconds, squared each attempt: 2, 4, 8, ...
+BACKOFF_CAP = 30.0
+
+# Worth another attempt: overload, throttling, gateway trouble. 403 and 404
+# are deliberately absent -- retrying those only turns a clear error into a
+# slow one.
+RETRY_STATUS = frozenset((408, 425, 429, 500, 502, 503, 504))
+
+
+class TruncatedDownload(IOError):
+    """
+    A download ended before Content-Length said it would.
+
+    Its own class so the retry policy can treat it as transient: a short read
+    is exactly the failure that resuming fixes, and the alternative is a
+    corrupt gzip that only reveals itself hours later, mid-parse.
+    """
+
+
+TRANSIENT_ERRORS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+    urllib.error.URLError,     # wraps DNS and socket failures
+    ConnectionError,           # builtin: reset, aborted, broken pipe
+    socket.timeout,
+    TruncatedDownload,
+)
+
+
+def _status_of(exc):
+    """The HTTP status an exception carries, or None if it is not one."""
+    resp = getattr(exc, "response", None)          # requests.HTTPError
+    if resp is not None and getattr(resp, "status_code", None):
+        return resp.status_code
+    return getattr(exc, "code", None)              # urllib.error.HTTPError
+
+
+def is_transient(exc):
+    """Whether another attempt could plausibly succeed."""
+    status = _status_of(exc)
+    if status is not None:
+        return status in RETRY_STATUS
+    return isinstance(exc, TRANSIENT_ERRORS)
+
+
+def retry(fn, what, attempts=MAX_ATTEMPTS, log=print, sleep=None):
+    """
+    Call fn(), retrying transient network failures with exponential backoff.
+
+    Re-raises immediately for anything permanent, and re-raises the last
+    failure once the attempts are spent -- the caller still finds out, it
+    just takes four tries first.
+
+    `sleep` is resolved at call time rather than bound as a default, so tests
+    can patch time.sleep and not actually wait out the backoff.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as e:
+            if attempt == attempts or not is_transient(e):
+                raise
+            delay = min(BACKOFF_BASE ** attempt, BACKOFF_CAP)
+            if log:
+                log("    %s failed (%s: %s) -- attempt %d of %d, retrying "
+                    "in %.0fs" % (what, type(e).__name__, e, attempt,
+                                  attempts, delay))
+            (sleep or time.sleep)(delay)
+
+
+def open_source(path_or_url, log=print):
     """
     Open a local or remote MRF uniformly, gzipped or not.
 
@@ -97,19 +177,35 @@ def open_source(path_or_url):
     file extension: payers serve plain .json from .gz URLs and vice versa,
     and signed URLs carry query strings that hide the real suffix.
 
+    A remote open is retried on transient failure. Note that this covers
+    establishing the stream, not reading it -- a connection that dies an hour
+    into a parse cannot be resumed from here, which is why DOWNLOAD_FIRST
+    exists.
+
     Returns (file_like, closer) where closer is a callable to release the
     underlying HTTP connection (or close the local file).
     """
     if path_or_url.startswith("http"):
-        r = requests.get(
-            path_or_url,
-            stream=True,
-            timeout=(10, 180),
-            headers=HTTP_HEADERS,
-        )
-        r.raise_for_status()
-        buf = io.BufferedReader(_ChunkedStream(r), buffer_size=262144)
-        head = buf.peek(2)[:2]
+        def connect():
+            r = requests.get(
+                path_or_url,
+                stream=True,
+                timeout=(10, 180),
+                headers=HTTP_HEADERS,
+            )
+            r.raise_for_status()
+            buf = io.BufferedReader(_ChunkedStream(r), buffer_size=262144)
+            # Peek inside the retry, not after it. A CDN that accepts the
+            # connection and then dies on the first chunk is a common
+            # failure, and it only surfaces on the first read.
+            try:
+                return r, buf, buf.peek(2)[:2]
+            except Exception:
+                r.close()
+                raise
+
+        r, buf, head = retry(connect, "GET " + path_or_url.split("?")[0],
+                             log=log)
         if head == ZIP_MAGIC:
             r.close()
             raise ValueError(_ZIP_MSG.format(path_or_url.split("?")[0]))
@@ -146,7 +242,7 @@ def _network_names(item):
     return {str(n).replace("|", "/") for n in nets if n}
 
 
-def read_header(path_or_url, probe=8192):
+def read_header(path_or_url, probe=8192, log=print):
     """
     Return the file-level metadata that sits ahead of the rate data.
 
@@ -161,7 +257,7 @@ def read_header(path_or_url, probe=8192):
 
     Cheap enough to call on its own: it reads 8 KB, not the file.
     """
-    src, closer = open_source(path_or_url)
+    src, closer = open_source(path_or_url, log=log)
     try:
         blob = src.read(probe).decode("utf-8", "replace")
     finally:
