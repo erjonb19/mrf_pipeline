@@ -35,6 +35,7 @@ import pyarrow.parquet as pq
 import config
 from mrf_parser import (
     build_relevant_groups,
+    read_header,
     stream_filtered_rates,
     BACKEND,
     HTTP_HEADERS,
@@ -46,6 +47,9 @@ def log(msg):
 
 
 CHUNK_ROWS = 200_000  # rows buffered before each Parquet row group
+
+# Where the per-payer TIN -> business_name lookups go, under OUTPUT_DIR.
+TIN_NAMES_DIR = "_tin_names"
 
 
 def load_targets(csv_path):
@@ -117,10 +121,44 @@ def systems_for(npi_csv, npi_to_system, tin_csv="", tin_to_system=None):
     return ",".join(sorted(found))
 
 
+def write_tin_names(payer, tin_names, out_dir):
+    """
+    Write one payer's {tin: business_name} as a small side lookup.
+
+    A name is ~30 characters and there are ~120 of them; on a rate column it
+    would repeat across tens of millions of rows to carry a handful of
+    distinct values. As a lookup it is one tiny file you can join when you
+    want a readable name and ignore when you don't.
+
+    One file per payer, not one shared file: the lanes run in parallel and
+    would clobber a single output. They live in a subdirectory so the
+    `payer_parquet/*.parquet` glob -- the rate dataset -- never picks them up.
+    """
+    if not tin_names:
+        return None
+    d = os.path.join(out_dir, TIN_NAMES_DIR)
+    os.makedirs(d, exist_ok=True)
+    df = pd.DataFrame(sorted(tin_names.items()),
+                      columns=["tin", "business_name"])
+    df["payer"] = payer
+    path = os.path.join(d, f"{payer}.parquet")
+    pq.write_table(pa.Table.from_pandas(df, preserve_index=False), path)
+    return path
+
+
 def parse_one(payer, source, target_npis, npi_to_system, out_path,
               max_records=None, tin_to_system=None):
     tin_to_system = tin_to_system or {}
     target_tins = frozenset(tin_to_system)
+
+    # Read the file-level metadata first: it is 8 KB off the front, and it is
+    # the only thing that dates the rates. Without it a consumer cannot tell
+    # a fresh file from one two reporting months stale.
+    hdr = read_header(source)
+    log(f"    {hdr['reporting_entity_name'] or '(no entity)'} | "
+        f"updated {hdr['last_updated_on'] or '?'} | "
+        f"schema {hdr['version'] or '?'}")
+
     log("  pass 1: provider references...")
     last = [time.time()]
 
@@ -131,8 +169,10 @@ def parse_one(payer, source, target_npis, npi_to_system, out_path,
             last[0] = time.time()
 
     sizes = {}
+    tin_names = {}
     rel = build_relevant_groups(source, target_npis, target_tins,
-                                progress=p1, group_sizes=sizes)
+                                progress=p1, group_sizes=sizes,
+                                tin_names=tin_names)
     by_tin = sum(1 for g in rel.values() if g["matched_tins"])
     log(f"    kept {len(rel)} relevant provider groups "
         f"({by_tin} matched by TIN, {len(rel) - by_tin} by NPI only)")
@@ -155,6 +195,9 @@ def parse_one(payer, source, target_npis, npi_to_system, out_path,
         df = pd.DataFrame(chunk)
         chunk = []
         df["payer"] = payer
+        df["reporting_entity_name"] = hdr["reporting_entity_name"]
+        df["last_updated_on"] = hdr["last_updated_on"]
+        df["schema_version"] = hdr["version"]
         # One rate can apply to a provider group spanning several systems,
         # so store every system it touches. Collapsing to one here (the old
         # behaviour) silently misattributed ~44% of rows; analyze.py decides
@@ -195,6 +238,9 @@ def parse_one(payer, source, target_npis, npi_to_system, out_path,
 
     os.replace(part, out_path)
     log(f"  wrote {out_path} ({total:,} rows, {multi:,} span >1 system)")
+    names_path = write_tin_names(payer, tin_names, os.path.dirname(out_path))
+    if names_path:
+        log(f"  wrote {names_path} ({len(tin_names)} TIN names)")
     return total
 
 

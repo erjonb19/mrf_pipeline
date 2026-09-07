@@ -25,7 +25,8 @@ import unittest
 
 import pandas as pd
 
-from mrf_parser import build_relevant_groups, stream_filtered_rates, open_source
+from mrf_parser import (build_relevant_groups, stream_filtered_rates,
+                        open_source, read_header, _network_names)
 from run_pipeline import load_target_tins, systems_for, cache_name, parse_one
 from find_files import (scan_index, matches, is_ancillary,
                         parse_args as find_files_args)
@@ -545,6 +546,118 @@ class TestAncillaryFilter(unittest.TestCase):
         rec = {"markets": {"group"}, "description": "", "names": []}
         self.assertTrue(matches(loc, rec, "any", None, [], medical=False))
         self.assertFalse(matches(loc, rec, "any", None, [], medical=True))
+
+
+META_FIXTURE = {
+    "reporting_entity_name": "Meta Payer",
+    "reporting_entity_type": "Health Insurance Issuer",
+    "last_updated_on": "2026-08-05",
+    "version": "2.0.1",
+    "provider_references": [
+        {   # Aetna shape: one group in several networks at once
+            "provider_group_id": 1,
+            "network_name": ["Open Access Elect Choice", "Aetna Select"],
+            "provider_groups": [{
+                "npi": [1111111111],
+                "tin": {"type": "ein", "value": "111111111",
+                        "business_name": "Test Hospital;Test Clinic"},
+            }],
+        },
+    ],
+    "in_network": [
+        {
+            "billing_code": "27447",
+            "billing_code_type": "CPT",
+            "description": "TOTAL KNEE ARTHROPLASTY",
+            "negotiated_rates": [{
+                "provider_references": [1],
+                "negotiated_prices": [{
+                    "negotiated_rate": 1000.0,
+                    "negotiated_type": "negotiated",
+                    "billing_class": "institutional",
+                }],
+            }],
+        },
+    ],
+}
+
+
+class TestNetworkNames(unittest.TestCase):
+    """The network_name field is an array in the schema and Aetna uses it."""
+
+    def test_array_is_read(self):
+        self.assertEqual(_network_names({"network_name": ["B", "A"]}),
+                         {"A", "B"})
+
+    def test_bare_string_is_tolerated(self):
+        self.assertEqual(_network_names({"network_name": "Solo"}), {"Solo"})
+
+    def test_missing_and_null_are_empty(self):
+        self.assertEqual(_network_names({}), set())
+        self.assertEqual(_network_names({"network_name": None}), set())
+
+    def test_pipe_in_a_name_cannot_corrupt_the_join(self):
+        # '|' is the separator, so it must not survive inside a value
+        self.assertEqual(_network_names({"network_name": ["A|B"]}), {"A/B"})
+
+
+class TestHeaderAndMetadata(unittest.TestCase):
+    """read_header, and the metadata pass 1 now collects."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="mrf_meta_")
+        cls.compact = os.path.join(cls.tmp, "compact.json")
+        with open(cls.compact, "w", encoding="utf-8") as f:
+            json.dump(META_FIXTURE, f, separators=(",", ":"))
+        # UnitedHealthcare pretty-prints; the regex must survive the spaces
+        cls.pretty = os.path.join(cls.tmp, "pretty.json")
+        with open(cls.pretty, "w", encoding="utf-8") as f:
+            json.dump(META_FIXTURE, f, indent=4)
+        cls.gz = os.path.join(cls.tmp, "compact_gz.json")
+        with gzip.open(cls.gz, "wb") as f:
+            f.write(json.dumps(META_FIXTURE).encode("utf-8"))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_reads_compact_pretty_and_gzip_alike(self):
+        for path in (self.compact, self.pretty, self.gz):
+            h = read_header(path)
+            self.assertEqual(h["reporting_entity_name"], "Meta Payer", path)
+            self.assertEqual(h["last_updated_on"], "2026-08-05", path)
+            self.assertEqual(h["version"], "2.0.1", path)
+
+    def test_absent_field_is_empty_not_missing(self):
+        path = os.path.join(self.tmp, "bare.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"in_network": []}, f)
+        self.assertEqual(read_header(path)["last_updated_on"], "")
+
+    def test_pass_one_collects_networks_and_business_names(self):
+        names = {}
+        rel = build_relevant_groups(self.compact, {"1111111111"},
+                                    frozenset({"111111111"}), tin_names=names)
+        self.assertEqual(rel["1"]["networks"],
+                         "Aetna Select|Open Access Elect Choice")
+        self.assertEqual(names, {"111111111": "Test Hospital;Test Clinic"})
+
+    def test_pass_one_records_names_only_for_matched_tins(self):
+        names = {}
+        build_relevant_groups(self.compact, {"1111111111"}, frozenset(),
+                              tin_names=names)
+        self.assertEqual(names, {})   # matched by NPI, no TIN hit
+
+    def test_rate_rows_carry_the_network(self):
+        names = {}
+        rel = build_relevant_groups(self.compact, {"1111111111"},
+                                    frozenset(), tin_names=names)
+        rows = list(stream_filtered_rates(self.compact, rel,
+                                          {"1111111111"}, frozenset()))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["network_names"],
+                         "Aetna Select|Open Access Elect Choice")
 
 
 if __name__ == "__main__":
