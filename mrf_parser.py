@@ -14,6 +14,9 @@ Designed to read from a local .json, local .json.gz, or remote .json.gz URL.
 
 import gzip
 import io
+from urllib.parse import urlparse, unquote, parse_qs
+import os
+import zipfile
 import re
 import socket
 import time
@@ -83,6 +86,10 @@ _ZIP_MSG = (
 # Several payer CDNs (UnitedHealthcare's among them) answer the default
 # python-requests user agent with 403, and some reject HEAD outright. Present
 # a browser UA and only ever GET.
+#: Sent when a server refuses the browser agent above. Names the tool rather
+#: than impersonating anything.
+PLAIN_AGENT = "mrf-pipeline/0.1 (+price-transparency research)"
+
 HTTP_HEADERS = {
     "Accept-Encoding": "identity",
     "Accept": "*/*",
@@ -169,7 +176,87 @@ def retry(fn, what, attempts=MAX_ATTEMPTS, log=print, sleep=None):
             (sleep or time.sleep)(delay)
 
 
-def open_source(path_or_url, log=print):
+def _get_stream(url, log=print):
+    """GET a URL, falling back to a plain agent when the browser one is refused.
+
+    Emblemhealth's WAF answers the browser User-Agent with 406 -- the opposite
+    of the usual problem, and the reason that header exists is that other payer
+    CDNs refuse the default python-requests one. A plain agent naming this tool
+    is accepted by both, and is the honest thing to send.
+    """
+    r = requests.get(url, stream=True, timeout=(10, 180), headers=HTTP_HEADERS)
+    if r.status_code == 406:
+        r.close()
+        log("    406, retrying as a plain client: " + url.split("?")[0])
+        r = requests.get(url, stream=True, timeout=(10, 180),
+                         headers={"Accept": "*/*", "User-Agent": PLAIN_AGENT})
+    r.raise_for_status()
+    return r
+
+
+def _zip_member(path, log=print):
+    """Open the JSON payload inside a ZIP archive.
+
+    A ZIP cannot be read from a stream: the central directory sits at the end
+    of the file, so the reader has to seek. That is why a remote archive is
+    downloaded before it is opened, and why this takes a local path only.
+
+    Archives in this corpus hold one JSON file, sometimes beside a readme or a
+    checksum. The largest member is taken rather than the first, because
+    ordering inside an archive is not guaranteed and the rate data is always
+    the biggest thing in it.
+    """
+    archive = zipfile.ZipFile(path)
+    members = [m for m in archive.infolist() if not m.is_dir()]
+    if not members:
+        archive.close()
+        raise ValueError(f"{path} is an empty ZIP archive")
+    json_members = [m for m in members if m.filename.lower().endswith(".json")]
+    chosen = max(json_members or members, key=lambda m: m.file_size)
+    if len(members) > 1:
+        log(f"    zip: {len(members)} members, reading {chosen.filename}")
+    handle = archive.open(chosen)
+
+    def close():
+        handle.close()
+        archive.close()
+
+    # Buffered: ijson reads in small bites and ZipExtFile is slow unbuffered.
+    return io.BufferedReader(handle, buffer_size=262144), close
+
+
+def _download_zip(url, cache_dir, log=print):
+    """Fetch a remote archive to disk so it can be seeked.
+
+    The cache name comes from a `FileName` query parameter where the URL has
+    one, and only otherwise from the path. Emblemhealth serves every archive
+    from the same `/Home/GetFile` path, so naming by path alone would collide
+    all of them onto one cache entry and silently serve the wrong file.
+
+    Streamed to a `.part` and renamed on success, so an interrupted fetch is
+    never mistaken for a complete archive on the next run.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    query = parse_qs(urlparse(url).query)
+    name = (query.get("FileName") or query.get("filename") or [""])[0]
+    if not name:
+        name = unquote(os.path.basename(urlparse(url).path)) or "archive.zip"
+    dest = os.path.join(cache_dir, os.path.basename(name))
+    if os.path.exists(dest):
+        log(f"    zip cached: {name}")
+        return dest
+    partial = dest + ".part"
+    log(f"    downloading archive: {name}")
+    with _get_stream(url, log) as r:
+        with open(partial, "wb") as fh:
+            for chunk in r.iter_content(chunk_size=1 << 20):
+                if chunk:
+                    fh.write(chunk)
+    os.replace(partial, dest)
+    return dest
+
+
+def open_source(path_or_url, log=print, cache_dir="mrf_cache"):
     """
     Open a local or remote MRF uniformly, gzipped or not.
 
@@ -187,13 +274,7 @@ def open_source(path_or_url, log=print):
     """
     if path_or_url.startswith("http"):
         def connect():
-            r = requests.get(
-                path_or_url,
-                stream=True,
-                timeout=(10, 180),
-                headers=HTTP_HEADERS,
-            )
-            r.raise_for_status()
+            r = _get_stream(path_or_url, log)
             buf = io.BufferedReader(_ChunkedStream(r), buffer_size=262144)
             # Peek inside the retry, not after it. A CDN that accepts the
             # connection and then dies on the first chunk is a common
@@ -207,8 +288,11 @@ def open_source(path_or_url, log=print):
         r, buf, head = retry(connect, "GET " + path_or_url.split("?")[0],
                              log=log)
         if head == ZIP_MAGIC:
+            # A ZIP has to be seeked, so the stream is abandoned and the
+            # archive fetched to disk instead. EmblemHealth publishes its
+            # indexes this way.
             r.close()
-            raise ValueError(_ZIP_MSG.format(path_or_url.split("?")[0]))
+            return _zip_member(_download_zip(path_or_url, cache_dir, log), log)
         if head == GZIP_MAGIC:
             return gzip.GzipFile(fileobj=buf), r.close
         return buf, r.close
@@ -216,7 +300,7 @@ def open_source(path_or_url, log=print):
     with open(path_or_url, "rb") as probe:
         head = probe.read(2)
     if head == ZIP_MAGIC:
-        raise ValueError(_ZIP_MSG.format(path_or_url))
+        return _zip_member(path_or_url, log)
     f = gzip.open(path_or_url, "rb") if head == GZIP_MAGIC else open(path_or_url, "rb")
     return f, f.close
 

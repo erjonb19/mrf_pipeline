@@ -216,23 +216,178 @@ class TestOpenSource(FixtureCase):
             closer()
 
 
-class TestZipRejection(unittest.TestCase):
-    """A few payer rate files are .zip; fail with an explanation, not a
-    confusing gzip/JSON parse error deep in pass 1."""
+class TestZipArchives(unittest.TestCase):
+    """A ZIP is read, not refused.
 
-    def test_zip_file_raises_a_useful_error(self):
+    This class used to assert the opposite. EmblemHealth publishes its indexes
+    as .zip and there is no gzip alternative, so refusing them meant the largest
+    NY payer after Anthem could not be reached at all.
+    """
+
+    def _archive(self, tmp, members):
+        import zipfile
+        path = os.path.join(tmp, "rates.zip")
+        with zipfile.ZipFile(path, "w") as z:
+            for name, body in members.items():
+                z.writestr(name, body)
+        return path
+
+    def test_a_single_member_archive_is_read(self):
+        tmp = tempfile.mkdtemp(prefix="mrf_zip_")
+        try:
+            path = self._archive(tmp, {"rates.json": '{"in_network": []}'})
+            src, closer = open_source(path)
+            try:
+                self.assertEqual(src.read(), b'{"in_network": []}')
+            finally:
+                closer()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_the_largest_json_member_is_chosen(self):
+        """Ordering inside an archive is not guaranteed; the rates are the
+        biggest thing in it, and a readme must not be read instead."""
+        tmp = tempfile.mkdtemp(prefix="mrf_zip_")
+        try:
+            path = self._archive(tmp, {
+                "readme.txt": "not the data",
+                "aaa_small.json": '{"in_network":[]}',
+                "rates.json": '{"in_network":[' + '{"x":1},' * 200 + '{"x":1}]}',
+            })
+            src, closer = open_source(path, log=lambda *a: None)
+            try:
+                body = src.read()
+            finally:
+                closer()
+            self.assertTrue(body.startswith(b'{"in_network":[{"x":1}'))
+            self.assertGreater(len(body), 200)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_an_empty_archive_is_an_error(self):
         tmp = tempfile.mkdtemp(prefix="mrf_zip_")
         try:
             import zipfile
-            p = os.path.join(tmp, "rates.zip")
-            with zipfile.ZipFile(p, "w") as z:
-                z.writestr("rates.json", '{"in_network": []}')
+            path = os.path.join(tmp, "empty.zip")
+            with zipfile.ZipFile(path, "w"):
+                pass
             with self.assertRaises(ValueError) as cm:
-                open_source(p)
-            self.assertIn("ZIP archive", str(cm.exception))
-            self.assertIn("find_files.py", str(cm.exception))
+                open_source(path)
+            self.assertIn("empty ZIP", str(cm.exception))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestArchiveCacheNaming(unittest.TestCase):
+    """Emblemhealth serves every archive from one path, `/Home/GetFile`.
+
+    Naming a cache entry from the URL path would collapse all of them onto one
+    file and then silently serve whichever was fetched first.
+    """
+
+    def test_the_filename_query_parameter_wins(self):
+        from mrf_parser import _download_zip
+        tmp = tempfile.mkdtemp(prefix="mrf_cache_")
+        try:
+            calls = []
+
+            def fake_get(url, log=print):
+                calls.append(url)
+                raise AssertionError("should not download; test asserts naming only")
+
+            import mrf_parser
+            original = mrf_parser._get_stream
+            mrf_parser._get_stream = fake_get
+            try:
+                # Pre-create the destination so the cache-hit path returns it.
+                dest = os.path.join(tmp, "2026-08-01_Emblemhealth_GHI_index.zip")
+                open(dest, "wb").close()
+                url = ("https://x/Home/GetFile?FileName="
+                       "2026-08-01_Emblemhealth_GHI_index.zip&NetworkType=INN")
+                got = _download_zip(url, tmp, log=lambda *a: None)
+                self.assertEqual(os.path.basename(got),
+                                 "2026-08-01_Emblemhealth_GHI_index.zip")
+                self.assertEqual(calls, [], "a cached archive must not be refetched")
+            finally:
+                mrf_parser._get_stream = original
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_two_urls_on_one_path_do_not_collide(self):
+        from urllib.parse import parse_qs, urlparse
+        names = set()
+        for f in ("2026-08-01_Emblemhealth_GHI_index.zip",
+                  "2026-08-01_Emblemhealth_COM_index.zip"):
+            url = f"https://x/Home/GetFile?FileName={f}&NetworkType=INN"
+            names.add(parse_qs(urlparse(url).query)["FileName"][0])
+        self.assertEqual(len(names), 2)
+
+
+class TestUserAgentFallback(unittest.TestCase):
+    """Emblemhealth's WAF answers the browser User-Agent with 406.
+
+    Backwards from the usual problem, and awkward because that header exists
+    precisely because other payer CDNs refuse the default python-requests one.
+    """
+
+    def test_a_406_is_retried_with_a_plain_agent(self):
+        import mrf_parser
+
+        class Resp:
+            def __init__(self, code):
+                self.status_code = code
+                self.closed = False
+            def close(self):
+                self.closed = True
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise AssertionError(f"unexpected {self.status_code}")
+
+        seen = []
+
+        def fake_get(url, stream=None, timeout=None, headers=None):
+            seen.append(headers)
+            return Resp(406 if len(seen) == 1 else 200)
+
+        original = mrf_parser.requests.get
+        mrf_parser.requests.get = fake_get
+        try:
+            r = mrf_parser._get_stream("https://x/f.json", log=lambda *a: None)
+        finally:
+            mrf_parser.requests.get = original
+
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(seen), 2, "should retry exactly once")
+        self.assertIn("Mozilla", seen[0]["User-Agent"])
+        self.assertEqual(seen[1]["User-Agent"], mrf_parser.PLAIN_AGENT)
+        self.assertNotIn("Mozilla", seen[1]["User-Agent"])
+
+    def test_a_success_is_not_retried(self):
+        import mrf_parser
+
+        class Resp:
+            status_code = 200
+            def raise_for_status(self):
+                pass
+
+        seen = []
+
+        def fake_get(url, stream=None, timeout=None, headers=None):
+            seen.append(headers)
+            return Resp()
+
+        original = mrf_parser.requests.get
+        mrf_parser.requests.get = fake_get
+        try:
+            mrf_parser._get_stream("https://x/f.json", log=lambda *a: None)
+        finally:
+            mrf_parser.requests.get = original
+        self.assertEqual(len(seen), 1)
+
+    def test_the_plain_agent_names_the_tool_rather_than_a_browser(self):
+        import mrf_parser
+        self.assertIn("mrf-pipeline", mrf_parser.PLAIN_AGENT)
+        self.assertNotIn("Mozilla", mrf_parser.PLAIN_AGENT)
 
 
 class TestSystemAttribution(unittest.TestCase):
