@@ -9,6 +9,12 @@ Reads a list of payer files from config, and for each one:
 Re-runnable: a crash or Ctrl-C loses at most the file in flight. Everything
 already parsed is left alone on the next run.
 
+Network failures are retried with exponential backoff, and a download resumes
+from the partial file rather than starting over -- these sources run to 15 GB,
+so a connection dropped near the end used to cost the whole transfer. A payer
+that fails every attempt is reported again at the end and makes the run exit
+non-zero, so a partial dataset is not mistaken for a complete one.
+
 Usage:
     python run_pipeline.py                 # parse every unparsed payer
     python run_pipeline.py --limit 50000   # stop each file after N rate rows
@@ -36,9 +42,12 @@ import config
 from mrf_parser import (
     build_relevant_groups,
     read_header,
+    retry,
     stream_filtered_rates,
     BACKEND,
     HTTP_HEADERS,
+    MAX_ATTEMPTS,
+    TruncatedDownload,
 )
 
 
@@ -89,8 +98,35 @@ def cache_name(url):
     return safe[:150] or "mrf_download"
 
 
-def download_once(url, cache_dir):
-    """Download url into cache_dir if not already there. Return local path."""
+def fetch_range(url, start):
+    """
+    Open url, asking the server to resume from byte `start`.
+
+    Returns (response, resuming). `resuming` is False when the server ignored
+    the Range header and started over from byte 0, which is legal and means
+    whatever was already on disk must be thrown away rather than appended to.
+    """
+    headers = dict(HTTP_HEADERS)
+    if start:
+        headers["Range"] = f"bytes={start}-"
+    resp = urllib.request.urlopen(
+        urllib.request.Request(url, headers=headers), timeout=180)
+    status = getattr(resp, "status", None) or resp.getcode()
+    return resp, status == 206
+
+
+def download_once(url, cache_dir, attempts=MAX_ATTEMPTS):
+    """
+    Download url into cache_dir if not already there. Return local path.
+
+    Resumes rather than restarts. These files run to 15 GB, so a connection
+    dropped at 12 GB used to cost the whole download; now the partial file
+    stays on disk and the next attempt asks for the rest with a Range header.
+
+    The finished size is checked against Content-Length, because a silently
+    truncated download is worse than a failed one: it produces a corrupt gzip
+    that only reveals itself hours later in the middle of a parse.
+    """
     os.makedirs(cache_dir, exist_ok=True)
     fname = cache_name(url)
     local = os.path.join(cache_dir, fname)
@@ -99,13 +135,30 @@ def download_once(url, cache_dir):
         return local
     log(f"  downloading: {fname}")
     tmp = local + ".part"
-    req = urllib.request.Request(url, headers=HTTP_HEADERS)
-    with urllib.request.urlopen(req, timeout=180) as resp, open(tmp, "wb") as out:
-        while True:
-            chunk = resp.read(1 << 20)
-            if not chunk:
-                break
-            out.write(chunk)
+
+    def attempt():
+        start = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+        resp, resuming = fetch_range(url, start)
+        if start and not resuming:
+            log(f"    server ignored Range; restarting from 0")
+            start = 0
+        elif start:
+            log(f"    resuming at {start/1e9:.2f} GB")
+        length = resp.headers.get("Content-Length")
+        expected = start + int(length) if length else None
+        with resp, open(tmp, "ab" if start else "wb") as out:
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                out.write(chunk)
+        got = os.path.getsize(tmp)
+        if expected and got != expected:
+            raise TruncatedDownload(
+                f"{fname}: got {got:,} of {expected:,} bytes")
+        return got
+
+    retry(attempt, f"download {fname}", attempts=attempts, log=log)
     os.replace(tmp, local)
     log(f"  downloaded: {fname} ({os.path.getsize(local)/1e9:.2f} GB)")
     return local
@@ -154,7 +207,7 @@ def parse_one(payer, source, target_npis, npi_to_system, out_path,
     # Read the file-level metadata first: it is 8 KB off the front, and it is
     # the only thing that dates the rates. Without it a consumer cannot tell
     # a fresh file from one two reporting months stale.
-    hdr = read_header(source)
+    hdr = read_header(source, log=log)
     log(f"    {hdr['reporting_entity_name'] or '(no entity)'} | "
         f"updated {hdr['last_updated_on'] or '?'} | "
         f"schema {hdr['version'] or '?'}")
@@ -301,6 +354,7 @@ def main(argv=()):
 
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     total_rows = 0
+    failed = []
 
     for pf in config.PAYER_FILES:
         payer = pf["payer"]
@@ -330,10 +384,19 @@ def main(argv=()):
             sys.exit(1)
         except Exception as e:  # one bad file shouldn't kill the run
             log(f"  ERROR on {payer}: {type(e).__name__}: {e}")
+            failed.append(payer)
             continue
 
     log(f"done. total rows across all payers: {total_rows:,}")
     log(f"parquet files in: {config.OUTPUT_DIR}/")
+    # A payer that failed every retry leaves no parquet behind, and the only
+    # evidence used to be one line in the middle of an hours-long log. Say it
+    # again at the end and exit non-zero, so a wrapper script or a CI step
+    # notices a partial dataset instead of treating it as a complete one.
+    if failed:
+        log(f"FAILED ({len(failed)}): {', '.join(failed)}")
+        log("re-run to retry them; parsed payers are skipped")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

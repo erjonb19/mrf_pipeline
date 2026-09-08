@@ -41,6 +41,8 @@ startup and falls back to pure Python if needed.
                            Table of Contents. `python find_files.py <index_url>`
 - `mrf_parser.py`        — core two-pass parser (don't need to touch).
 - `run_pipeline.py`      — orchestrator. `python run_pipeline.py`
+- `validate.py`          — checks the finished Parquet against the contract in
+                           `docs/`. `python validate.py`
 - `analyze.py`           — DuckDB comparison. `python analyze.py [codes...]`
 - `detail.py`            — row-level dump/export. `python detail.py [codes...]`
 - `diagnose.py`          — why-is-this-file-empty tool. `python diagnose.py <payer>`
@@ -77,7 +79,23 @@ startup and falls back to pure Python if needed.
    Output written under `--limit` is partial. Delete that Parquet before a
    real run.
 
-4. Analyze:
+4. Check what came out:
+   ```bash
+   python validate.py                        # every file
+   python validate.py --expect-month 2026-08 # require a reporting month
+   python validate.py --strict               # warnings fail too
+   ```
+   Exits non-zero on a failure, so it can gate a run:
+   `python run_pipeline.py && python validate.py`.
+
+   It checks the finished Parquet, not the code that wrote it — the schema,
+   the join keys, that every row names a provider, that no column came out
+   empty, and that no file is quietly a month behind the rest. Warnings are
+   for things that are true but not broken: a mostly-zero-rate file, a
+   column a payer left blank, two files holding the same rates under
+   different network names.
+
+5. Analyze:
    ```bash
    python analyze.py                 # everything
    python analyze.py 27447 99213     # specific billing codes
@@ -86,7 +104,7 @@ startup and falls back to pure Python if needed.
                                            # "Contract vs fee schedule")
    ```
 
-5. Inspect the rows behind a number:
+6. Inspect the rows behind a number:
    ```bash
    python detail.py 27447                          # print (capped at 200)
    python detail.py --system "NYU Langone" 27447
