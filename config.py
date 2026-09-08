@@ -70,4 +70,38 @@ PAYER_FILES = [
     {"payer": "UHC_NY_POSChoicePlus", "url": UHC_NY + "PS1-50_C2_in-network-rates.json.gz"},          # 15.08 GB, 211 plans
     {"payer": "UHC_NY_ChoiceEPO50", "url": UHC_NY + "EP1-50_C1_in-network-rates.json.gz"},            # 15.08 GB, 89 plans
     {"payer": "UHC_NY_NationalPPO", "url": UHC_NY + "PP1-00_P3_in-network-rates.json.gz"},            # 15.42 GB, 28 plans
+
+    # --- Empire BlueCross BlueShield (Anthem NY) ---------------------------
+    # The largest commercial insurer for several NY systems and the biggest gap
+    # in the corpus. Picked from the Anthem index with find_files.py, filtered
+    # to NY_ files in the group market: the top file by plan count,
+    # NY_HYPAMED0000, is individual/exchange and its plan names mention
+    # "HMO MAINE" and "CO IND", so it is multi-state despite the NY_ prefix and
+    # is deliberately excluded.
+    #
+    # Ordered cheapest first so results arrive early. Sizes are HEAD-probed.
+    {"payer": "Empire_ConnectionEPO", "url": r"https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/NY_HYLZMED0000.json.gz"},   # 0.95 GB, 4,229 plans, Connection EPO
+    {"payer": "Empire_PPO", "url": r"https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/NY_GZHYMEDAP36.json.gz"},             # 2.72 GB, 1,832 plans, PPO NY
+    {"payer": "Empire_SmallGroupEPO", "url": r"https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/NY_HXQTMED0000.json.gz"},   # 3.41 GB, 5,611 plans, NY SG EPO Network
+    {"payer": "Empire_EPO", "url": r"https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/NY_HXNWMED0000.json.gz"},             # 3.90 GB, 1,489 plans, EPO NY + Connection EPO w/ HSA
 ]
+
+# --- EmblemHealth ---------------------------------------------------------
+# Emblemhealth partitions by PROVIDER GROUP, not by network: its index lists
+# 1,700 in-network files, one per provider, all referencing the same 470 plans.
+# There is no "broad network" file to choose, so the hospital-typed files are
+# taken as a set and the parser's TIN/NPI filter does the selecting -- a file
+# for a provider outside the target list yields no rows and writes nothing.
+#
+# 280 files, ~1.2 GB in total, mean 4.6 MB each. The list is generated from the
+# index rather than written out here; regenerate it when the reporting month
+# changes, since the URLs carry the month and a stale one 404s to an HTML page.
+import json as _json
+import os as _os
+
+_EMBLEM_LIST = _os.path.join(_os.path.dirname(__file__), "emblem_hospital_files.json")
+if _os.path.exists(_EMBLEM_LIST):
+    with open(_EMBLEM_LIST, encoding="utf-8") as _fh:
+        for _url in _json.load(_fh):
+            _stem = _url.rsplit("/", 1)[-1].replace("innetwork-G-", "").replace("-file-1.json", "")
+            PAYER_FILES.append({"payer": "Emblem_" + _stem, "url": _url})
