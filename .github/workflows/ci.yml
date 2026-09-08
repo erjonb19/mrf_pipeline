@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          # The version requirements.txt records as verified. Widening the
+          # matrix is a deliberate step, not a default: nothing here has been
+          # run on 3.12, and a matrix that has never passed is not a signal.
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Test
+        # The suite makes no network calls: every HTTP path is monkeypatched
+        # and every URL in it is a fixture. A payer CDN being down must never
+        # turn this red.
+        run: pytest -q
+
+      - name: Lint (advisory)
+        # Not a gate. The tree currently has 56 ruff findings, and a check that
+        # is red on the day it lands teaches people to ignore CI. This makes the
+        # count visible so it can be driven down, and it can become a gate once
+        # it reaches zero.
+        continue-on-error: true
+        run: |
+          pip install ruff
+          ruff check . --output-format=concise || true
+          echo "--- advisory only; see the comment in ci.yml ---"
